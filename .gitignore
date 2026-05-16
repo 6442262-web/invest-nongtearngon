@@ -16,8 +16,15 @@ venv/
 .venv/
 env/
 
-# Daily snapshots (local only)
+# Daily snapshots & local runtime files (local only)
 daily_snapshot.json
+paper_state.json
+webull_snapshot.json
+morning_signal_latest.json
+backtest_trades.json
+backtest_swing_trades.json
+backtest_swing_gold.json
+backtest_3asset.json
 
 # IDE
 .vscode/

@@ -1,0 +1,45 @@
+name: Daily Paper Trading Signal (Telegram)
+
+on:
+  schedule:
+    # 20:00 Bangkok (UTC+7) = 13:00 UTC, Mon-Fri
+    # รันก่อนตลาด US เปิด 30 นาที (US Open 20:30 BKK)
+    - cron: "0 13 * * 1-5"
+  workflow_dispatch:   # รัน manual จาก GitHub UI ได้
+
+jobs:
+  paper-trading:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run paper trading signal & notify Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          PORTFOLIO_THB:      "5000"
+          # Webull ไม่ใส่ → รันแบบ Simulated (ส่ง Telegram เท่านั้น)
+          # WEBULL_EMAIL:    ${{ secrets.WEBULL_EMAIL }}
+          # WEBULL_PASSWORD: ${{ secrets.WEBULL_PASSWORD }}
+          # WEBULL_TRADE_PIN:${{ secrets.WEBULL_TRADE_PIN }}
+        run: python -X utf8 webull_paper.py
+
+      - name: Upload snapshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webull-snapshot-${{ github.run_number }}
+          path: webull_snapshot.json
+          retention-days: 14

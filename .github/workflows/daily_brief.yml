@@ -1,0 +1,44 @@
+name: Daily Investment Brief
+
+on:
+  schedule:
+    # 7:00 AM Bangkok (UTC+7) = 00:00 UTC, Mon-Fri
+    - cron: "0 0 * * 1-5"
+  workflow_dispatch:  # allow manual trigger from GitHub UI
+
+jobs:
+  run-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run investment analysis
+        env:
+          EMAIL_SENDER:    ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:  ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+          SMTP_HOST:       smtp.gmail.com
+          SMTP_PORT:       "587"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -X utf8 invest_analysis.py
+
+      - name: Upload snapshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-snapshot-${{ github.run_number }}
+          path: daily_snapshot.json
+          retention-days: 30
