@@ -64,7 +64,7 @@ WATCHLIST = [
     "AVGO","NOW","PANW","ADBE","CRM",
     "DDOG","NET","ZS","TSLA","MRVL","AXON","TTD",
 ]
-MACRO_TICKERS = ["DX-Y.NYB","^VIX","^TNX","HYG","QQQ","GLD","^GSPC","THBX=X"]
+MACRO_TICKERS = ["DX-Y.NYB","^VIX","^TNX","HYG","QQQ","GLD","^GSPC","THB=X"]
 
 
 # ─────────────────────────────────────────────────────────
@@ -72,19 +72,26 @@ MACRO_TICKERS = ["DX-Y.NYB","^VIX","^TNX","HYG","QQQ","GLD","^GSPC","THBX=X"]
 # ─────────────────────────────────────────────────────────
 
 def get_thb_rate():
+    """
+    ดึงอัตราแลกเปลี่ยน THB/USD จาก Yahoo Finance
+    THB=X = USDTHB (จำนวนบาทต่อ 1 ดอลลาร์) → ใช้ค่าตรงๆ
+    """
     global THB_USD_RATE
-    try:
-        df = yf.download("THBX=X", period="5d", progress=False)
-        if df.empty:
-            # fallback: USDTHB
-            df = yf.download("THB=X", period="5d", progress=False)
-        if not df.empty:
-            usd_per_thb = float(df["Close"].dropna().iloc[-1])
-            THB_USD_RATE = 1 / usd_per_thb if usd_per_thb < 1 else usd_per_thb
-    except:
-        pass
-    if not THB_USD_RATE or THB_USD_RATE < 25 or THB_USD_RATE > 50:
-        THB_USD_RATE = 35.0   # fallback rate
+    for symbol in ["THB=X", "USDTHB=X"]:
+        try:
+            df = yf.download(symbol, period="5d", progress=False, auto_adjust=True)
+            if df.empty:
+                continue
+            rate = float(df["Close"].dropna().iloc[-1])
+            # THB=X ให้ค่าประมาณ 33-36 (บาทต่อดอลลาร์)
+            if 25 < rate < 50:
+                THB_USD_RATE = rate
+                return THB_USD_RATE
+        except:
+            continue
+    # fallback
+    if not THB_USD_RATE or not (25 < THB_USD_RATE < 50):
+        THB_USD_RATE = 35.0
     return THB_USD_RATE
 
 def thb_to_usd(thb): return thb / THB_USD_RATE
@@ -304,6 +311,15 @@ def get_macro(data):
     if g is not None:
         info["gold_5d"]=round(pct(g,5),2)
         score+=(-1 if pct(g,5)>3 else 1 if pct(g,5)<-2 else 0)
+
+    # อัตราแลกเปลี่ยน THB/USD (อัปเดตทุกรอบจาก data ที่ดึงมา)
+    t=a("THB=X",2)
+    if t is not None:
+        live_rate = float(t[-1])
+        if 25 < live_rate < 50:
+            global THB_USD_RATE
+            THB_USD_RATE = live_rate
+    info["thb_usd"] = round(THB_USD_RATE, 2)
 
     info["score"]=score
     if   score>=4:  regime="STRONG_ON"
@@ -585,6 +601,10 @@ def build_email_html(state, regime, mac_score, macro_info,
       <span class="mval">{macro_info.get('dxy','?')}</span>
       <span class="mlbl">DXY</span>
     </span>
+    <span class="metric" style="background:#fef9c3;padding:4px 8px;border-radius:6px">
+      <span class="mval" style="color:#92400e">฿{macro_info.get('thb_usd', THB_USD_RATE):.2f}</span>
+      <span class="mlbl">💱 1 USD (live)</span>
+    </span>
     """
 
     # ── Positions table ──
@@ -836,6 +856,8 @@ def build_telegram_message(state, regime, mac_score, macro_info,
              f"  │  ทอง 5d <b>{macro_info.get('gold_5d',0):+.2f}%</b>")
     L.append(f"   10Y Yield <b>{macro_info.get('yield_10y','?')}%</b>"
              f"  │  DXY <b>{macro_info.get('dxy','?')}</b>")
+    L.append(f"   💱 1 USD = <b>฿{macro_info.get('thb_usd', THB_USD_RATE):.2f}</b>"
+             f"  (live)")
 
     # ── Portfolio
     L.append(f"\n💼 <b>Portfolio Paper Trading</b>")
