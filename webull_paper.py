@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Webull Paper Trading + LINE Notify
-พอร์ต ฿5,000 | แจ้งเตือน LINE ทุกวัน | Fractional Shares
+Webull Paper Trading + Telegram Bot Notify
+พอร์ต ฿5,000 | แจ้งเตือน Telegram ทุกวัน | Fractional Shares
 รันทุกวัน 20:00 น. ไทย (ก่อนตลาด US เปิด 30 นาที)
 
 Setup:
   pip install webull requests yfinance pandas numpy python-dotenv
   แล้วกรอก .env ตาม .env.example
+
+หมายเหตุ: LINE Notify ปิดให้บริการแล้ว 31 มี.ค. 2025
+         เปลี่ยนมาใช้ Telegram Bot แทน (ฟรี, เสถียรกว่า)
 """
 
 import os, json, time, warnings, math
@@ -26,8 +29,11 @@ WB_EMAIL    = os.getenv("WEBULL_EMAIL", "")
 WB_PASSWORD = os.getenv("WEBULL_PASSWORD", "")
 WB_TRADE_PIN= os.getenv("WEBULL_TRADE_PIN", "")   # 6-digit trading PIN
 
-# ── LINE Notify ───────────────────────────────────────────
-LINE_TOKEN  = os.getenv("LINE_NOTIFY_TOKEN", "")   # จาก notify-bot.line.me
+# ── Telegram Bot ─────────────────────────────────────────
+# สร้าง Bot: คุยกับ @BotFather ใน Telegram → /newbot
+# หา Chat ID: คุยกับ @userinfobot → copy id ตัวเลข
+TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")   # จาก @BotFather
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID",  "")    # จาก @userinfobot
 
 # ── Portfolio (THB) ───────────────────────────────────────
 PORTFOLIO_THB   = float(os.getenv("PORTFOLIO_THB", "5000"))
@@ -470,130 +476,169 @@ def apply_entries(state, picks, data, wb):
 
 
 # ─────────────────────────────────────────────────────────
-# 5. LINE Notify
+# 5. Telegram Bot Notify
 # ─────────────────────────────────────────────────────────
 
-def send_line(message, image_url=None):
-    if not LINE_TOKEN:
-        print("  [!] LINE_NOTIFY_TOKEN ไม่ได้ตั้งค่า")
-        print(f"\n--- LINE Message Preview ---\n{message}\n---")
+def send_telegram(message):
+    """
+    ส่งข้อความผ่าน Telegram Bot API
+    รองรับ Markdown: *bold* _italic_ `code`
+    """
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print("  [!] Telegram ยังไม่ได้ตั้งค่า")
+        print("      TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID ใน .env")
+        print(f"\n--- Telegram Preview ---\n{message}\n---")
         return False
     try:
-        headers = {"Authorization": f"Bearer {LINE_TOKEN}"}
-        data    = {"message": message}
-        if image_url:
-            data["imageFullsize"]  = image_url
-            data["imageThumbnail"] = image_url
-        r = requests.post("https://notify-api.line.me/api/notify",
-                          headers=headers, data=data, timeout=10)
+        url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        data = {
+            "chat_id":    TG_CHAT_ID,
+            "text":       message,
+            "parse_mode": "HTML",      # รองรับ <b> <i> <code>
+            "disable_web_page_preview": True,
+        }
+        r = requests.post(url, json=data, timeout=15)
         ok = r.status_code == 200
-        print(f"  LINE Notify: {'OK' if ok else f'FAIL ({r.status_code})'}")
+        if not ok:
+            print(f"  Telegram FAIL: {r.status_code} {r.text[:200]}")
+        else:
+            print("  Telegram: ส่งแล้ว ✓")
         return ok
     except Exception as e:
-        print(f"  LINE error: {e}")
+        print(f"  Telegram error: {e}")
         return False
 
-def build_line_message(state, regime, mac_score, macro_info,
-                       exits, entries, all_signals, gold_score, gold_info):
-    now = datetime.now() + timedelta(hours=0)  # server time
+def send_telegram_chunks(message):
+    """ถ้าข้อความยาวเกิน 4096 ตัว (Telegram limit) → แบ่งส่ง"""
+    MAX = 4000
+    if len(message) <= MAX:
+        return send_telegram(message)
+    parts = [message[i:i+MAX] for i in range(0, len(message), MAX)]
+    ok = True
+    for i, part in enumerate(parts, 1):
+        header = f"<b>[{i}/{len(parts)}]</b>\n" if len(parts) > 1 else ""
+        ok = send_telegram(header + part) and ok
+        time.sleep(0.5)
+    return ok
+
+def build_telegram_message(state, regime, mac_score, macro_info,
+                           exits, entries, all_signals, gold_score, gold_info):
+    """
+    สร้างข้อความสำหรับ Telegram (HTML format)
+    <b>bold</b>  <i>italic</i>  <code>code</code>
+    """
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
-    # emoji ตาม regime
     regime_emoji = {
-        "STRONG_ON":"🚀", "RISK_ON":"📈", "NEUTRAL":"➡️",
-        "RISK_OFF":"⚠️", "CRISIS":"🚨"
+        "STRONG_ON":"🚀","RISK_ON":"📈","NEUTRAL":"➡️",
+        "RISK_OFF":"⚠️","CRISIS":"🚨"
     }.get(regime,"📊")
-
     regime_th = {
-        "STRONG_ON":"แข็งแกร่งมาก", "RISK_ON":"ขาขึ้น",
-        "NEUTRAL":"ทรงตัว", "RISK_OFF":"ระวัง", "CRISIS":"วิกฤต"
+        "STRONG_ON":"แข็งแกร่งมาก","RISK_ON":"ขาขึ้น",
+        "NEUTRAL":"ทรงตัว","RISK_OFF":"ระวัง","CRISIS":"วิกฤต"
     }.get(regime, regime)
 
-    # คำนวณ portfolio value
+    # Portfolio value
     total_invested = sum(p["size_thb"] for p in state["positions"].values())
-    pnl_today_thb = 0
-    for tk, pos in state["positions"].items():
-        sig = next((s for s in all_signals if s and s["ticker"]==tk), None)
-        if sig:
-            pnl_today_thb += pos["size_thb"] * (sig["mom_1d"]/100)
+    total_value    = state.get("cash_thb",0) + total_invested
+    total_ret_pct  = (total_value - PORTFOLIO_THB) / PORTFOLIO_THB * 100
+    ret_emoji      = "🟢" if total_ret_pct >= 0 else "🔴"
 
-    total_value = state.get("cash_thb",0) + total_invested
-    total_return_pct = (total_value - PORTFOLIO_THB) / PORTFOLIO_THB * 100
+    L = []   # lines
 
-    lines = []
-    lines.append(f"\n🌅 Morning Signal — {now_bkk.strftime('%d %b %Y %H:%M น.')}")
-    lines.append(f"{'─'*30}")
+    # ── Header
+    L.append(f"🌅 <b>Morning Signal</b>  {now_bkk.strftime('%d %b %Y  %H:%M น.')}")
+    L.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    # Macro
-    lines.append(f"\n{regime_emoji} ตลาด: {regime_th} (score {mac_score:+d})")
-    lines.append(f"   VIX {macro_info.get('vix','?')} | S&P500 {macro_info.get('sp500_1d',0):+.2f}%")
-    lines.append(f"   QQQ 5d {macro_info.get('qqq_5d',0):+.2f}% | ทอง 5d {macro_info.get('gold_5d',0):+.2f}%")
+    # ── Macro
+    L.append(f"\n{regime_emoji} <b>ตลาด: {regime_th}</b>  (score <code>{mac_score:+d}</code>)")
+    L.append(f"   VIX <b>{macro_info.get('vix','?')}</b>"
+             f"  │  S&amp;P500 <b>{macro_info.get('sp500_1d',0):+.2f}%</b>")
+    L.append(f"   QQQ 5d <b>{macro_info.get('qqq_5d',0):+.2f}%</b>"
+             f"  │  ทอง 5d <b>{macro_info.get('gold_5d',0):+.2f}%</b>")
+    L.append(f"   10Y Yield <b>{macro_info.get('yield_10y','?')}%</b>"
+             f"  │  DXY <b>{macro_info.get('dxy','?')}</b>")
 
-    # Portfolio summary
-    lines.append(f"\n💼 พอร์ต Paper Trading")
-    lines.append(f"   เริ่มต้น : {fmt_thb(PORTFOLIO_THB)}")
-    lines.append(f"   ปัจจุบัน : {fmt_thb(total_value)} ({total_return_pct:+.2f}%)")
-    lines.append(f"   กำไร/ขาดทุน: {fmt_thb(total_value - PORTFOLIO_THB)}")
-    lines.append(f"   เงินสดเหลือ: {fmt_thb(state.get('cash_thb',0))}")
-    lines.append(f"   อัตราแลกเปลี่ยน: 1 USD = ฿{THB_USD_RATE:.2f}")
+    # ── Portfolio
+    L.append(f"\n💼 <b>Portfolio Paper Trading</b>")
+    L.append(f"   เริ่มต้น   : <b>{fmt_thb(PORTFOLIO_THB)}</b>")
+    L.append(f"   ปัจจุบัน  : {ret_emoji} <b>{fmt_thb(total_value)}</b>  ({total_ret_pct:+.2f}%)")
+    L.append(f"   กำไร/ขาดทุน: <b>{fmt_thb(total_value - PORTFOLIO_THB)}</b>")
+    L.append(f"   เงินสด     : <b>{fmt_thb(state.get('cash_thb',0))}</b>")
+    L.append(f"   1 USD = ฿{THB_USD_RATE:.2f}")
 
-    # Current positions
+    # ── Current positions
     if state["positions"]:
-        lines.append(f"\n📂 Position ที่ถือ ({len(state['positions'])} ตัว)")
+        L.append(f"\n📂 <b>Position ที่ถือ</b>  ({len(state['positions'])} ตัว)")
         for tk, pos in state["positions"].items():
-            sig = next((s for s in all_signals if s and s["ticker"]==tk), None)
-            cur  = sig["price"] if sig else pos["entry_price"]
-            pnl  = (cur - pos["entry_price"])/pos["entry_price"]*100
-            pnl_thb = pos["size_thb"] * pnl/100
-            emoji = "🟢" if pnl>0 else "🔴"
-            lines.append(f"   {emoji} {tk}: {pnl:+.2f}% | {fmt_thb(pnl_thb)}")
-            lines.append(f"      ซื้อ ${pos['entry_price']:.2f} → ปัจจุบัน ${cur:.2f}")
-            lines.append(f"      SL=${pos['sl_price']} | TP=${pos['tp_price']}")
-    else:
-        lines.append(f"\n📂 ไม่มี Position เปิดอยู่")
+            sig     = next((s for s in all_signals if s and s["ticker"]==tk), None)
+            cur     = sig["price"] if sig else pos["entry_price"]
+            pnl_pct = (cur - pos["entry_price"]) / pos["entry_price"] * 100
+            pnl_thb = pos["size_thb"] * pnl_pct / 100
+            hold    = pos.get("hold_days", 0)
+            icon    = "🟢" if pnl_pct >= 0 else "🔴"
+            peak    = pos.get("peak_price", cur)
+            trail_from_peak = (cur - peak) / peak * 100
 
-    # Exits
+            L.append(f"\n   {icon} <b>{tk}</b>  {pnl_pct:+.2f}%  ({fmt_thb(pnl_thb)})")
+            L.append(f"      ซื้อ <code>${pos['entry_price']:.2f}</code>"
+                     f" → ปัจจุบัน <code>${cur:.2f}</code>  ({hold}วัน)")
+            L.append(f"      🛑 SL <code>${pos['sl_price']}</code>"
+                     f"  🎯 TP <code>${pos['tp_price']}</code>")
+            L.append(f"      Peak <code>${peak:.2f}</code>  ({trail_from_peak:+.1f}% จาก peak)")
+    else:
+        L.append(f"\n📂 <b>ไม่มี Position เปิดอยู่</b>")
+
+    # ── Exits today
     if exits:
-        lines.append(f"\n🔔 ปิด Position วันนี้ ({len(exits)} ตัว)")
+        L.append(f"\n🔔 <b>ปิด Position วันนี้</b>  ({len(exits)} ตัว)")
         for ex in exits:
-            emoji = "✅" if ex["pnl_thb"]>=0 else "❌"
-            lines.append(f"   {emoji} {ex['ticker']}: {ex['pnl_pct']:+.2f}% | {fmt_thb(ex['pnl_thb'])}")
-            lines.append(f"      เหตุ: {ex['reason']}")
+            icon = "✅" if ex["pnl_thb"] >= 0 else "❌"
+            L.append(f"   {icon} <b>{ex['ticker']}</b>  {ex['pnl_pct']:+.2f}%"
+                     f"  │  {fmt_thb(ex['pnl_thb'])}")
+            L.append(f"      📌 {ex['reason']}")
 
-    # New entries
+    # ── New entries
     if entries:
-        lines.append(f"\n🛒 ซื้อใหม่วันนี้ (ตลาดเปิด 20:30 น.)")
+        L.append(f"\n🛒 <b>ซื้อใหม่วันนี้</b>  (ตลาดเปิด 20:30 น.)")
         for en in entries:
-            lines.append(f"   ✨ {en['ticker']} @ ${en['price']:.2f}")
-            lines.append(f"      {fmt_thb(en['size_thb'])} (~{fmt_usd(thb_to_usd(en['size_thb']))})")
-            lines.append(f"      SL=${en['price']*(1-SL_PCT):.2f} | TP=${en['price']*(1+TP_PCT):.2f}")
+            L.append(f"\n   ✨ <b>{en['ticker']}</b>"
+                     f"  @  <code>${en['price']:.2f}</code>")
+            L.append(f"      {fmt_thb(en['size_thb'])}"
+                     f"  (~{fmt_usd(thb_to_usd(en['size_thb']))})")
+            L.append(f"      🛑 SL <code>${en['price']*(1-SL_PCT):.2f}</code>"
+                     f"  🎯 TP <code>${en['price']*(1+TP_PCT):.2f}</code>"
+                     f"  📉 Trail {int(TRAIL_PCT*100)}%")
     else:
-        lines.append(f"\n💤 ไม่มีการซื้อใหม่วันนี้")
+        L.append(f"\n💤 <b>ไม่มีการซื้อใหม่</b>")
         if regime in ("RISK_OFF","CRISIS"):
-            lines.append(f"   (ตลาด{regime_th} — ถือเงินสดไว้ก่อน)")
+            L.append(f"   ตลาด{regime_th} — ถือเงินสดไว้ก่อน")
 
-    # Top signals
-    top = sorted([s for s in all_signals if s and s["score"]>=MIN_SCORE],
-                 key=lambda x:x["score"], reverse=True)[:5]
+    # ── Top signals watchlist
+    top = sorted([s for s in all_signals if s and s["score"] >= MIN_SCORE],
+                 key=lambda x: x["score"], reverse=True)[:6]
     if top:
-        lines.append(f"\n🔍 หุ้นน่าสนใจวันนี้")
+        L.append(f"\n🔍 <b>หุ้นน่าสนใจวันนี้</b>")
         for s in top:
-            bar = "█"*min(s["score"],8) + "░"*(8-min(s["score"],8))
-            lines.append(f"   {s['ticker']}: {bar} score={s['score']}")
-            lines.append(f"      1d {s['mom_1d']:+.1f}% | 5d {s['mom_5d']:+.1f}% | vol {s['vol_ratio']:.1f}x")
+            held = "📌" if s["ticker"] in state["positions"] else "  "
+            bar  = "█" * min(s["score"], 8) + "░" * (8 - min(s["score"], 8))
+            L.append(f"   {held}<b>{s['ticker']}</b> <code>{bar}</code> {s['score']}")
+            L.append(f"      1d <b>{s['mom_1d']:+.1f}%</b>"
+                     f"  5d <b>{s['mom_5d']:+.1f}%</b>"
+                     f"  vol <b>{s['vol_ratio']:.1f}x</b>")
 
-    # Gold signal
+    # ── Gold
     if gold_score > 0:
-        lines.append(f"\n🥇 ทอง (GLD): score={gold_score} | 5d {gold_info.get('mom_5d',0):+.1f}%")
+        L.append(f"\n🥇 <b>ทอง GLD</b>  score={gold_score}"
+                 f"  │  5d {gold_info.get('mom_5d',0):+.1f}%"
+                 f"  20d {gold_info.get('mom_20d',0):+.1f}%")
 
-    # Risk reminder
-    lines.append(f"\n⚙️ Risk Profile: AGGRESSIVE")
-    lines.append(f"   SL={int(SL_PCT*100)}% | TP={int(TP_PCT*100)}% | Trail={int(TRAIL_PCT*100)}%")
+    # ── Footer
+    L.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━")
+    L.append(f"⚙️ AGGRESSIVE  SL={int(SL_PCT*100)}%  TP={int(TP_PCT*100)}%  Trail={int(TRAIL_PCT*100)}%")
+    L.append(f"🤖 invest-nongtearngon  |  Paper {fmt_thb(PORTFOLIO_THB)}")
 
-    lines.append(f"\n{'─'*30}")
-    lines.append(f"🤖 Auto-signal by invest-nongtearngon")
-
-    return "\n".join(lines)
+    return "\n".join(L)
 
 
 # ─────────────────────────────────────────────────────────
@@ -602,7 +647,7 @@ def build_line_message(state, regime, mac_score, macro_info,
 
 def run():
     print("\n" + "="*60)
-    print("  Webull Paper Trading + LINE Notify")
+    print("  Webull Paper Trading + Telegram Notify")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M')} | พอร์ต {fmt_thb(PORTFOLIO_THB)}")
     print("="*60)
 
@@ -667,13 +712,13 @@ def run():
     save_state(state)
     print(f"  State saved | Positions: {len(state['positions'])} | Cash: {fmt_thb(state['cash_thb'])}")
 
-    # LINE Notify
-    print("\n[6/6] ส่ง LINE Notify...")
-    msg = build_line_message(
+    # Telegram Notify
+    print("\n[6/6] ส่ง Telegram...")
+    msg = build_telegram_message(
         state, regime, mac_score, macro_info,
         exits, entries, signals, gold_sc, gold_info
     )
-    send_line(msg)
+    send_telegram_chunks(msg)
 
     # Save snapshot
     snapshot = dict(
@@ -688,7 +733,7 @@ def run():
         json.dump(snapshot, f, indent=2, default=str)
 
     print("\n" + "="*60)
-    print("  เสร็จแล้ว! ดู LINE สำหรับ summary")
+    print("  เสร็จแล้ว! ดู Telegram สำหรับ summary")
     print("="*60 + "\n")
 
 
