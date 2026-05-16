@@ -370,6 +370,117 @@ def score_gold(data):
 
 
 # ─────────────────────────────────────────────────────────
+# 3b. News Fetcher — Economic & Tech
+# ─────────────────────────────────────────────────────────
+
+# คีย์เวิร์ดกรองข่าวเศรษฐกิจ
+_ECON_KEYS = [
+    "fed","rate","inflation","gdp","jobs","payroll","cpi","ppi",
+    "interest","economy","recession","yield","tariff","treasury",
+    "fomc","powell","employment","fiscal","deficit","trade war",
+    "dollar","dxy","เฟด","ดอกเบี้ย","เงินเฟ้อ","เศรษฐกิจ",
+]
+# คีย์เวิร์ดกรองข่าวเทค
+_TECH_KEYS = [
+    "ai","chip","semiconductor","cloud","software","tech","cyber",
+    "earnings","revenue","guidance","nvidia","microsoft","google",
+    "apple","meta","amazon","tesla","broadcom","crowdstrike",
+    "datadog","zscaler","palo alto","snowflake","salesforce",
+    "profit","beat","miss","outlook","forecast","ipo","acquisition",
+]
+
+def _extract_news_item(raw):
+    """รองรับ yfinance structure ทั้งเก่าและใหม่"""
+    if "content" in raw:
+        # yfinance >= 0.2.54 format
+        c      = raw["content"]
+        title  = c.get("title","") or c.get("headline","")
+        pub    = (c.get("provider") or {}).get("displayName","")
+        link   = (c.get("canonicalUrl") or {}).get("url","") or \
+                 (c.get("clickThroughUrl") or {}).get("url","")
+        ts_str = c.get("pubDate","")        # "2026-05-16T11:44:39Z"
+        try:
+            # parse ISO 8601
+            ts_str_clean = ts_str.replace("Z","+00:00")
+            from datetime import timezone
+            dt = datetime.fromisoformat(ts_str_clean)
+            ts = dt.timestamp()
+        except:
+            ts = 0
+    else:
+        # yfinance รุ่นเก่า
+        title = raw.get("title","")
+        pub   = raw.get("publisher","")
+        link  = raw.get("link","")
+        ts    = raw.get("providerPublishTime", 0)
+    return title.strip(), pub, link, ts
+
+def fetch_news():
+    """
+    ดึงข่าวจาก yfinance แบ่งเป็น:
+      - economic_news : ข่าวเศรษฐกิจ/macro
+      - tech_news     : ข่าวหุ้นเทค
+    คืนค่า (economic_news[:6], tech_news[:8])
+    """
+    cutoff = datetime.now().timestamp() - 72 * 3600   # 72 ชม. ล่าสุด
+    seen   = set()
+    econ, tech = [], []
+
+    # ── ดึงจาก macro tickers ──
+    for sym in ["SPY","QQQ","TLT","GLD","^TNX","HYG"]:
+        try:
+            items = yf.Ticker(sym).news or []
+            for raw in items:
+                title, pub, link, ts = _extract_news_item(raw)
+                if not title or title in seen or ts < cutoff:
+                    continue
+                seen.add(title)
+                tl = title.lower()
+                if any(k in tl for k in _ECON_KEYS):
+                    econ.append(dict(title=title, pub=pub, link=link, ts=ts, sym=sym))
+                elif any(k in tl for k in _TECH_KEYS):
+                    tech.append(dict(title=title, pub=pub, link=link, ts=ts, sym=sym))
+                else:
+                    econ.append(dict(title=title, pub=pub, link=link, ts=ts, sym=sym))
+        except:
+            pass
+
+    # ── ดึงจากหุ้นเทคใน watchlist ──
+    for sym in ["NVDA","MSFT","AAPL","META","GOOGL","AMZN",
+                "PANW","DDOG","ZS","NET","AVGO","NOW","TSLA"]:
+        try:
+            items = yf.Ticker(sym).news or []
+            for raw in items[:4]:   # แค่ 4 ข่าวต่อตัว
+                title, pub, link, ts = _extract_news_item(raw)
+                if not title or title in seen or ts < cutoff:
+                    continue
+                seen.add(title)
+                tech.append(dict(title=title, pub=pub, link=link, ts=ts, sym=sym))
+        except:
+            pass
+
+    # sort newest first
+    econ.sort(key=lambda x: x["ts"], reverse=True)
+    tech.sort(key=lambda x: x["ts"], reverse=True)
+
+    # dedup tech by sym: ไม่เกิน 2 ข่าวต่อตัว
+    sym_count, tech_filtered = {}, []
+    for n in tech:
+        cnt = sym_count.get(n["sym"], 0)
+        if cnt < 2:
+            tech_filtered.append(n)
+            sym_count[n["sym"]] = cnt + 1
+
+    return econ[:6], tech_filtered[:10]
+
+def _fmt_time_ago(ts):
+    diff = datetime.now().timestamp() - ts
+    if diff < 3600:   return f"{int(diff/60)} นาทีที่แล้ว"
+    if diff < 86400:  return f"{int(diff/3600)} ชม.ที่แล้ว"
+    return f"{int(diff/86400)} วันที่แล้ว"
+
+
+# ─────────────────────────────────────────────────────────
 # 4. Position Management
 # ─────────────────────────────────────────────────────────
 
@@ -509,8 +620,11 @@ def apply_entries(state, picks, data, wb):
 # ── 5a. Email ────────────────────────────────────────────
 
 def build_email_html(state, regime, mac_score, macro_info,
-                     exits, entries, all_signals, gold_score, gold_info):
-    """สร้าง HTML email สวยงาม พร้อมตาราง portfolio"""
+                     exits, entries, all_signals, gold_score, gold_info,
+                     econ_news=None, tech_news=None):
+    """สร้าง HTML email สวยงาม พร้อมตาราง portfolio + ข่าว"""
+    econ_news = econ_news or []
+    tech_news = tech_news or []
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
     regime_color = {
@@ -742,12 +856,51 @@ def build_email_html(state, regime, mac_score, macro_info,
     </table>
   </div>
 
+  {_build_news_html(econ_news, tech_news)}
+
   <div class="footer">
     ⚙️ AGGRESSIVE  SL={int(SL_PCT*100)}%  TP={int(TP_PCT*100)}%  Trail={int(TRAIL_PCT*100)}%
     &nbsp;|&nbsp; 🤖 invest-nongtearngon  |  Paper {fmt_thb(PORTFOLIO_THB)}
   </div>
 </body></html>"""
     return html
+
+
+def _build_news_html(econ_news, tech_news):
+    """สร้าง HTML สำหรับส่วนข่าว"""
+    if not econ_news and not tech_news:
+        return ""
+
+    def news_li(n):
+        ago  = _fmt_time_ago(n["ts"])
+        pub  = f" <span style='color:#9ca3af'>· {n['pub']}</span>" if n.get("pub") else ""
+        link = n.get("link","")
+        title_html = (f'<a href="{link}" style="color:#1d4ed8;text-decoration:none">{n["title"]}</a>'
+                      if link else n["title"])
+        return (f'<li style="margin-bottom:8px;line-height:1.4">'
+                f'{title_html}{pub}'
+                f'<span style="display:block;font-size:11px;color:#9ca3af">{ago}</span>'
+                f'</li>')
+
+    econ_html = ""
+    if econ_news:
+        items = "".join(news_li(n) for n in econ_news)
+        econ_html = f"""
+        <div class="card">
+          <h3>📰 ข่าวเศรษฐกิจสำคัญ</h3>
+          <ul style="padding-left:18px;margin:0">{items}</ul>
+        </div>"""
+
+    tech_html = ""
+    if tech_news:
+        items = "".join(news_li(n) for n in tech_news)
+        tech_html = f"""
+        <div class="card">
+          <h3>💻 ข่าวหุ้นเทค</h3>
+          <ul style="padding-left:18px;margin:0">{items}</ul>
+        </div>"""
+
+    return econ_html + tech_html
 
 
 def send_email(subject, html_body):
@@ -820,11 +973,14 @@ def send_telegram_chunks(message):
     return ok
 
 def build_telegram_message(state, regime, mac_score, macro_info,
-                           exits, entries, all_signals, gold_score, gold_info):
+                           exits, entries, all_signals, gold_score, gold_info,
+                           econ_news=None, tech_news=None):
     """
     สร้างข้อความสำหรับ Telegram (HTML format)
     <b>bold</b>  <i>italic</i>  <code>code</code>
     """
+    econ_news = econ_news or []
+    tech_news = tech_news or []
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
     regime_emoji = {
@@ -933,6 +1089,23 @@ def build_telegram_message(state, regime, mac_score, macro_info,
                  f"  │  5d {gold_info.get('mom_5d',0):+.1f}%"
                  f"  20d {gold_info.get('mom_20d',0):+.1f}%")
 
+    # ── Economic News
+    if econ_news:
+        L.append(f"\n📰 <b>ข่าวเศรษฐกิจสำคัญ</b>")
+        for n in econ_news[:5]:
+            ago = _fmt_time_ago(n["ts"])
+            L.append(f"   • {n['title']}")
+            L.append(f"     <i>{n.get('pub','')}  {ago}</i>")
+
+    # ── Tech News
+    if tech_news:
+        L.append(f"\n💻 <b>ข่าวหุ้นเทค</b>")
+        for n in tech_news[:6]:
+            ago = _fmt_time_ago(n["ts"])
+            sym_tag = f"[{n['sym']}] " if n.get("sym") else ""
+            L.append(f"   • <b>{sym_tag}</b>{n['title']}")
+            L.append(f"     <i>{n.get('pub','')}  {ago}</i>")
+
     # ── Footer
     L.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━")
     L.append(f"⚙️ AGGRESSIVE  SL={int(SL_PCT*100)}%  TP={int(TP_PCT*100)}%  Trail={int(TRAIL_PCT*100)}%")
@@ -1012,6 +1185,11 @@ def run():
     save_state(state)
     print(f"  State saved | Positions: {len(state['positions'])} | Cash: {fmt_thb(state['cash_thb'])}")
 
+    # Fetch News
+    print("\n[5.5/6] ดึงข่าว...")
+    econ_news, tech_news = fetch_news()
+    print(f"  ข่าวเศรษฐกิจ {len(econ_news)} | ข่าวเทค {len(tech_news)}")
+
     # Notify — Email + Telegram
     print("\n[6/6] ส่งการแจ้งเตือน...")
     now_bkk = datetime.utcnow() + timedelta(hours=7)
@@ -1022,7 +1200,8 @@ def run():
     # Email (primary)
     html_body = build_email_html(
         state, regime, mac_score, macro_info,
-        exits, entries, signals, gold_sc, gold_info
+        exits, entries, signals, gold_sc, gold_info,
+        econ_news, tech_news
     )
     send_email(subject, html_body)
 
@@ -1030,7 +1209,8 @@ def run():
     if TG_TOKEN and TG_CHAT_ID:
         tg_msg = build_telegram_message(
             state, regime, mac_score, macro_info,
-            exits, entries, signals, gold_sc, gold_info
+            exits, entries, signals, gold_sc, gold_info,
+            econ_news, tech_news
         )
         send_telegram_chunks(tg_msg)
 
@@ -1042,12 +1222,14 @@ def run():
         positions=state["positions"],
         exits=exits, entries=entries,
         signals=sorted(signals, key=lambda x:x["score"], reverse=True)[:10],
+        econ_news=[{"title":n["title"],"pub":n["pub"]} for n in econ_news],
+        tech_news=[{"title":n["title"],"sym":n["sym"]} for n in tech_news],
     )
     with open("webull_snapshot.json","w") as f:
         json.dump(snapshot, f, indent=2, default=str)
 
     print("\n" + "="*60)
-    print("  เสร็จแล้ว! ดู Telegram สำหรับ summary")
+    print("  เสร็จแล้ว! ดู email สำหรับ summary")
     print("="*60 + "\n")
 
 
