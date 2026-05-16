@@ -1,21 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-Webull Paper Trading + Telegram Bot Notify
-พอร์ต ฿5,000 | แจ้งเตือน Telegram ทุกวัน | Fractional Shares
+Webull Paper Trading + Email & Telegram Notify
+พอร์ต ฿5,000 | แจ้งเตือนทางอีเมล (+ Telegram ถ้าตั้งค่าไว้) | Fractional Shares
 รันทุกวัน 20:00 น. ไทย (ก่อนตลาด US เปิด 30 นาที)
 
 Setup:
   pip install webull requests yfinance pandas numpy python-dotenv
   แล้วกรอก .env ตาม .env.example
 
-หมายเหตุ: LINE Notify ปิดให้บริการแล้ว 31 มี.ค. 2025
-         เปลี่ยนมาใช้ Telegram Bot แทน (ฟรี, เสถียรกว่า)
+แจ้งเตือน:
+  - Email (Gmail SMTP) — ตั้งค่า EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_RECIPIENT
+  - Telegram Bot       — ตั้งค่า TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (optional)
 """
 
-import os, json, time, warnings, math
+import os, json, time, warnings, math, smtplib
 warnings.filterwarnings("ignore")
 
 from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 import requests
 import numpy as np
 import pandas as pd
@@ -29,7 +32,15 @@ WB_EMAIL    = os.getenv("WEBULL_EMAIL", "")
 WB_PASSWORD = os.getenv("WEBULL_PASSWORD", "")
 WB_TRADE_PIN= os.getenv("WEBULL_TRADE_PIN", "")   # 6-digit trading PIN
 
-# ── Telegram Bot ─────────────────────────────────────────
+# ── Email (Gmail SMTP) ───────────────────────────────────
+# Gmail App Password: myaccount.google.com/apppasswords
+EMAIL_SENDER    = os.getenv("EMAIL_SENDER", "")
+EMAIL_PASSWORD  = os.getenv("EMAIL_PASSWORD", "")
+EMAIL_RECIPIENT = os.getenv("EMAIL_RECIPIENT", "")
+SMTP_HOST       = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT       = int(os.getenv("SMTP_PORT", "587"))
+
+# ── Telegram Bot (optional) ──────────────────────────────
 # สร้าง Bot: คุยกับ @BotFather ใน Telegram → /newbot
 # หา Chat ID: คุยกับ @userinfobot → copy id ตัวเลข
 TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")   # จาก @BotFather
@@ -476,8 +487,275 @@ def apply_entries(state, picks, data, wb):
 
 
 # ─────────────────────────────────────────────────────────
-# 5. Telegram Bot Notify
+# 5. Notify — Email + Telegram (optional)
 # ─────────────────────────────────────────────────────────
+
+# ── 5a. Email ────────────────────────────────────────────
+
+def build_email_html(state, regime, mac_score, macro_info,
+                     exits, entries, all_signals, gold_score, gold_info):
+    """สร้าง HTML email สวยงาม พร้อมตาราง portfolio"""
+    now_bkk = datetime.utcnow() + timedelta(hours=7)
+
+    regime_color = {
+        "STRONG_ON":"#16a34a","RISK_ON":"#2563eb",
+        "NEUTRAL":"#6b7280","RISK_OFF":"#d97706","CRISIS":"#dc2626"
+    }.get(regime,"#6b7280")
+    regime_th = {
+        "STRONG_ON":"แข็งแกร่งมาก 🚀","RISK_ON":"ขาขึ้น 📈",
+        "NEUTRAL":"ทรงตัว ➡️","RISK_OFF":"ระวัง ⚠️","CRISIS":"วิกฤต 🚨"
+    }.get(regime, regime)
+
+    total_invested = sum(p["size_thb"] for p in state["positions"].values())
+    total_value    = state.get("cash_thb", 0) + total_invested
+    total_ret_pct  = (total_value - PORTFOLIO_THB) / PORTFOLIO_THB * 100
+    ret_color      = "#16a34a" if total_ret_pct >= 0 else "#dc2626"
+    ret_sign       = "+" if total_ret_pct >= 0 else ""
+
+    # ── styles ──
+    css = """
+    body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f4f8;margin:0;padding:20px}
+    .card{background:#fff;border-radius:12px;padding:24px;margin-bottom:16px;
+          box-shadow:0 1px 4px rgba(0,0,0,.08)}
+    h2{margin:0 0 4px;font-size:20px} h3{margin:8px 0 12px;font-size:15px;color:#374151}
+    .tag{display:inline-block;padding:4px 12px;border-radius:20px;color:#fff;
+         font-weight:600;font-size:13px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th{background:#f9fafb;color:#6b7280;font-weight:600;padding:8px 10px;
+       text-align:left;border-bottom:2px solid #e5e7eb}
+    td{padding:8px 10px;border-bottom:1px solid #f3f4f6}
+    tr:hover td{background:#fafafa}
+    .pos{color:#16a34a;font-weight:600} .neg{color:#dc2626;font-weight:600}
+    .metric{display:inline-block;min-width:120px;margin:4px 8px 4px 0}
+    .mval{font-size:18px;font-weight:700;display:block}
+    .mlbl{font-size:11px;color:#9ca3af}
+    .footer{font-size:11px;color:#9ca3af;text-align:center;padding-top:8px}
+    """
+
+    def pnl_cls(v): return "pos" if v >= 0 else "neg"
+    def sign(v):    return "+" if v >= 0 else ""
+
+    # ── Portfolio metrics row ──
+    metrics_html = f"""
+    <span class="metric">
+      <span class="mval">{fmt_thb(PORTFOLIO_THB)}</span>
+      <span class="mlbl">เริ่มต้น</span>
+    </span>
+    <span class="metric">
+      <span class="mval" style="color:{ret_color}">{fmt_thb(total_value)}</span>
+      <span class="mlbl">ปัจจุบัน ({ret_sign}{total_ret_pct:.2f}%)</span>
+    </span>
+    <span class="metric">
+      <span class="mval" style="color:{ret_color}">{fmt_thb(total_value-PORTFOLIO_THB)}</span>
+      <span class="mlbl">กำไร/ขาดทุน</span>
+    </span>
+    <span class="metric">
+      <span class="mval">{fmt_thb(state.get('cash_thb',0))}</span>
+      <span class="mlbl">เงินสด</span>
+    </span>
+    <span class="metric">
+      <span class="mval">฿{THB_USD_RATE:.2f}</span>
+      <span class="mlbl">1 USD</span>
+    </span>
+    """
+
+    # ── Macro row ──
+    macro_html = f"""
+    <span class="metric">
+      <span class="mval">{macro_info.get('vix','?')}</span>
+      <span class="mlbl">VIX</span>
+    </span>
+    <span class="metric">
+      <span class="mval">{sign(macro_info.get('sp500_1d',0))}{macro_info.get('sp500_1d',0):.2f}%</span>
+      <span class="mlbl">S&amp;P500 1d</span>
+    </span>
+    <span class="metric">
+      <span class="mval">{sign(macro_info.get('qqq_5d',0))}{macro_info.get('qqq_5d',0):.2f}%</span>
+      <span class="mlbl">QQQ 5d</span>
+    </span>
+    <span class="metric">
+      <span class="mval">{sign(macro_info.get('gold_5d',0))}{macro_info.get('gold_5d',0):.2f}%</span>
+      <span class="mlbl">ทอง 5d</span>
+    </span>
+    <span class="metric">
+      <span class="mval">{macro_info.get('yield_10y','?')}%</span>
+      <span class="mlbl">10Y Yield</span>
+    </span>
+    <span class="metric">
+      <span class="mval">{macro_info.get('dxy','?')}</span>
+      <span class="mlbl">DXY</span>
+    </span>
+    """
+
+    # ── Positions table ──
+    if state["positions"]:
+        pos_rows = ""
+        for tk, pos in state["positions"].items():
+            sig     = next((s for s in all_signals if s and s["ticker"]==tk), None)
+            cur     = sig["price"] if sig else pos["entry_price"]
+            pnl_pct = (cur - pos["entry_price"]) / pos["entry_price"] * 100
+            pnl_thb = pos["size_thb"] * pnl_pct / 100
+            hold    = pos.get("hold_days", 0)
+            peak    = pos.get("peak_price", cur)
+            trail   = (cur - peak) / peak * 100
+            pos_rows += f"""
+            <tr>
+              <td><b>{tk}</b></td>
+              <td>${pos['entry_price']:.2f}</td>
+              <td>${cur:.2f}</td>
+              <td class="{pnl_cls(pnl_pct)}">{sign(pnl_pct)}{pnl_pct:.2f}%</td>
+              <td class="{pnl_cls(pnl_thb)}">{fmt_thb(pnl_thb)}</td>
+              <td>{hold} วัน</td>
+              <td>${pos['sl_price']} / ${pos['tp_price']}</td>
+            </tr>"""
+        pos_html = f"""
+        <table>
+          <tr><th>หุ้น</th><th>ราคาซื้อ</th><th>ปัจจุบัน</th>
+              <th>%</th><th>กำไร (฿)</th><th>ถือ</th><th>SL / TP</th></tr>
+          {pos_rows}
+        </table>"""
+    else:
+        pos_html = "<p style='color:#6b7280'>ไม่มี position เปิดอยู่</p>"
+
+    # ── Exits table ──
+    exits_html = ""
+    if exits:
+        ex_rows = "".join(f"""
+        <tr>
+          <td><b>{ex['ticker']}</b></td>
+          <td>${ex['entry']:.2f}</td>
+          <td>${ex['exit_price']:.2f}</td>
+          <td class="{pnl_cls(ex['pnl_pct'])}">{sign(ex['pnl_pct'])}{ex['pnl_pct']:.2f}%</td>
+          <td class="{pnl_cls(ex['pnl_thb'])}">{fmt_thb(ex['pnl_thb'])}</td>
+          <td>{ex['hold_days']} วัน</td>
+          <td>{ex['reason']}</td>
+        </tr>""" for ex in exits)
+        exits_html = f"""
+        <div class="card">
+          <h3>🔔 ปิด Position วันนี้ ({len(exits)} ตัว)</h3>
+          <table>
+            <tr><th>หุ้น</th><th>ซื้อ</th><th>ขาย</th>
+                <th>%</th><th>กำไร (฿)</th><th>ถือ</th><th>เหตุผล</th></tr>
+            {ex_rows}
+          </table>
+        </div>"""
+
+    # ── New entries ──
+    entries_html = ""
+    if entries:
+        en_rows = "".join(f"""
+        <tr>
+          <td><b>{en['ticker']}</b></td>
+          <td>${en['price']:.2f}</td>
+          <td>{fmt_thb(en['size_thb'])} (~{fmt_usd(thb_to_usd(en['size_thb']))})</td>
+          <td>${en['price']*(1-SL_PCT):.2f}</td>
+          <td>${en['price']*(1+TP_PCT):.2f}</td>
+          <td>score {en['score']}</td>
+        </tr>""" for en in entries)
+        entries_html = f"""
+        <div class="card">
+          <h3>🛒 ซื้อใหม่วันนี้ — รอตลาดเปิด 20:30 น.</h3>
+          <table>
+            <tr><th>หุ้น</th><th>ราคา</th><th>ลงทุน</th>
+                <th>🛑 SL</th><th>🎯 TP</th><th>Signal</th></tr>
+            {en_rows}
+          </table>
+        </div>"""
+    else:
+        no_entry_note = ""
+        if regime in ("RISK_OFF","CRISIS"):
+            no_entry_note = f"<p style='color:#d97706'>ตลาด{regime_th} — ถือเงินสดไว้ก่อน</p>"
+        entries_html = f"""
+        <div class="card">
+          <h3>💤 ไม่มีการซื้อใหม่วันนี้</h3>
+          {no_entry_note}
+        </div>"""
+
+    # ── Top watchlist ──
+    top = sorted([s for s in all_signals if s and s["score"] >= MIN_SCORE],
+                 key=lambda x: x["score"], reverse=True)[:8]
+    watch_rows = "".join(f"""
+    <tr>
+      <td><b>{'📌 ' if s['ticker'] in state['positions'] else ''}{s['ticker']}</b></td>
+      <td>{s['score']}</td>
+      <td class="{pnl_cls(s['mom_1d'])}">{sign(s['mom_1d'])}{s['mom_1d']:.1f}%</td>
+      <td class="{pnl_cls(s['mom_5d'])}">{sign(s['mom_5d'])}{s['mom_5d']:.1f}%</td>
+      <td>{s['vol_ratio']:.1f}x</td>
+      <td>${s['price']:.2f}</td>
+      <td>{'✅' if s['above_20ma'] else '—'}</td>
+    </tr>""" for s in top) if top else "<tr><td colspan='7' style='color:#9ca3af'>ไม่มีหุ้นผ่านเกณฑ์</td></tr>"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>{css}</style></head>
+<body>
+  <div class="card" style="background:linear-gradient(135deg,#1e3a5f,#2563eb);color:#fff">
+    <h2>🌅 Morning Signal — Paper Trading</h2>
+    <p style="margin:4px 0;opacity:.85">{now_bkk.strftime('%A %d %B %Y  %H:%M น. (เวลาไทย)')}</p>
+    <span class="tag" style="background:{regime_color};margin-top:8px">
+      ตลาด: {regime_th}  (score {mac_score:+d})
+    </span>
+  </div>
+
+  <div class="card">
+    <h3>🌐 ภาวะตลาดโลก</h3>
+    {macro_html}
+  </div>
+
+  <div class="card">
+    <h3>💼 Portfolio Paper Trading</h3>
+    {metrics_html}
+  </div>
+
+  <div class="card">
+    <h3>📂 Position ที่ถือ ({len(state['positions'])} ตัว)</h3>
+    {pos_html}
+  </div>
+
+  {exits_html}
+  {entries_html}
+
+  <div class="card">
+    <h3>🔍 หุ้นน่าสนใจ (score ≥ {MIN_SCORE})</h3>
+    <table>
+      <tr><th>หุ้น</th><th>Score</th><th>1d</th><th>5d</th><th>Volume</th><th>ราคา</th><th>&gt;MA20</th></tr>
+      {watch_rows}
+    </table>
+  </div>
+
+  <div class="footer">
+    ⚙️ AGGRESSIVE  SL={int(SL_PCT*100)}%  TP={int(TP_PCT*100)}%  Trail={int(TRAIL_PCT*100)}%
+    &nbsp;|&nbsp; 🤖 invest-nongtearngon  |  Paper {fmt_thb(PORTFOLIO_THB)}
+  </div>
+</body></html>"""
+    return html
+
+
+def send_email(subject, html_body):
+    """ส่ง HTML email ผ่าน Gmail SMTP"""
+    if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECIPIENT:
+        print("  [!] Email ยังไม่ได้ตั้งค่า (EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_RECIPIENT)")
+        return False
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = EMAIL_SENDER
+        msg["To"]      = EMAIL_RECIPIENT
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
+
+        print(f"  Email: ส่งแล้ว → {EMAIL_RECIPIENT} ✓")
+        return True
+    except Exception as e:
+        print(f"  Email error: {e}")
+        return False
+
+
+# ── 5b. Telegram (optional) ──────────────────────────────
 
 def send_telegram(message):
     """
@@ -712,13 +990,27 @@ def run():
     save_state(state)
     print(f"  State saved | Positions: {len(state['positions'])} | Cash: {fmt_thb(state['cash_thb'])}")
 
-    # Telegram Notify
-    print("\n[6/6] ส่ง Telegram...")
-    msg = build_telegram_message(
+    # Notify — Email + Telegram
+    print("\n[6/6] ส่งการแจ้งเตือน...")
+    now_bkk = datetime.utcnow() + timedelta(hours=7)
+    subject  = (f"📊 Paper Trading Signal  {now_bkk.strftime('%d/%m/%Y')}"
+                f"  |  {regime}  ({mac_score:+d})"
+                f"  |  {len(entries)} Buy / {len(exits)} Close")
+
+    # Email (primary)
+    html_body = build_email_html(
         state, regime, mac_score, macro_info,
         exits, entries, signals, gold_sc, gold_info
     )
-    send_telegram_chunks(msg)
+    send_email(subject, html_body)
+
+    # Telegram (optional — ถ้ามี token)
+    if TG_TOKEN and TG_CHAT_ID:
+        tg_msg = build_telegram_message(
+            state, regime, mac_score, macro_info,
+            exits, entries, signals, gold_sc, gold_info
+        )
+        send_telegram_chunks(tg_msg)
 
     # Save snapshot
     snapshot = dict(

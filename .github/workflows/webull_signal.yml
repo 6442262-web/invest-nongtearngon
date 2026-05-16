@@ -25,12 +25,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run paper trading signal & notify Telegram
+      - name: Run paper trading signal & notify
         env:
+          # Email (หลัก) — ต้องใส่ใน GitHub Secrets
+          EMAIL_SENDER:       ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:     ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:    ${{ secrets.EMAIL_RECIPIENT }}
+          SMTP_HOST:          smtp.gmail.com
+          SMTP_PORT:          "587"
+          # Telegram (optional) — ใส่หรือไม่ใส่ก็ได้
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           PORTFOLIO_THB:      "5000"
-          # Webull ไม่ใส่ → รันแบบ Simulated (ส่ง Telegram เท่านั้น)
+          # Webull ไม่ใส่ → รันแบบ Simulated (ส่ง email เท่านั้น)
           # WEBULL_EMAIL:    ${{ secrets.WEBULL_EMAIL }}
           # WEBULL_PASSWORD: ${{ secrets.WEBULL_PASSWORD }}
           # WEBULL_TRADE_PIN:${{ secrets.WEBULL_TRADE_PIN }}
