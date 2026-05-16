@@ -471,13 +471,53 @@ def fetch_news():
             tech_filtered.append(n)
             sym_count[n["sym"]] = cnt + 1
 
-    return econ[:6], tech_filtered[:10]
+    econ_final = econ[:6]
+    tech_final = tech_filtered[:10]
+
+    # แปลข่าวเป็นภาษาไทย
+    print("  กำลังแปลข่าว EN → TH ...")
+    _translate_news(econ_final)
+    _translate_news(tech_final)
+
+    return econ_final, tech_final
 
 def _fmt_time_ago(ts):
     diff = datetime.now().timestamp() - ts
     if diff < 3600:   return f"{int(diff/60)} นาทีที่แล้ว"
     if diff < 86400:  return f"{int(diff/3600)} ชม.ที่แล้ว"
     return f"{int(diff/86400)} วันที่แล้ว"
+
+
+def _translate_news(news_list):
+    """
+    แปลชื่อข่าวจาก EN → TH แบบ batch
+    คืนค่า list เดิมพร้อม key 'title_th' เพิ่มเข้ามา
+    """
+    try:
+        from deep_translator import GoogleTranslator
+        translator = GoogleTranslator(source="en", target="th")
+        titles = [n["title"] for n in news_list]
+
+        # batch แปลทีละ 5 (หลีกเลี่ยง rate limit)
+        translated = []
+        for i in range(0, len(titles), 5):
+            batch = titles[i:i+5]
+            for t in batch:
+                try:
+                    th = translator.translate(t) or ""
+                    translated.append(th)
+                except:
+                    translated.append("")
+            if i + 5 < len(titles):
+                time.sleep(0.3)
+
+        for n, th in zip(news_list, translated):
+            n["title_th"] = th
+    except Exception as e:
+        print(f"  [translate] {e}")
+        for n in news_list:
+            n["title_th"] = ""
+    return news_list
 
 
 # ─────────────────────────────────────────────────────────
@@ -872,14 +912,23 @@ def _build_news_html(econ_news, tech_news):
         return ""
 
     def news_li(n):
-        ago  = _fmt_time_ago(n["ts"])
-        pub  = f" <span style='color:#9ca3af'>· {n['pub']}</span>" if n.get("pub") else ""
-        link = n.get("link","")
-        title_html = (f'<a href="{link}" style="color:#1d4ed8;text-decoration:none">{n["title"]}</a>'
-                      if link else n["title"])
-        return (f'<li style="margin-bottom:8px;line-height:1.4">'
-                f'{title_html}{pub}'
-                f'<span style="display:block;font-size:11px;color:#9ca3af">{ago}</span>'
+        ago      = _fmt_time_ago(n["ts"])
+        pub      = n.get("pub","")
+        link     = n.get("link","")
+        title_en = n["title"]
+        title_th = n.get("title_th","")
+
+        title_html = (f'<a href="{link}" style="color:#1d4ed8;text-decoration:none;font-weight:600">{title_en}</a>'
+                      if link else f'<b>{title_en}</b>')
+        th_html = (f'<span style="display:block;color:#374151;font-size:13px;margin-top:2px">'
+                   f'📌 {title_th}</span>' if title_th else "")
+        meta = f'<span style="font-size:11px;color:#9ca3af">{pub}  ·  {ago}</span>' if pub else \
+               f'<span style="font-size:11px;color:#9ca3af">{ago}</span>'
+
+        return (f'<li style="margin-bottom:12px;line-height:1.5">'
+                f'{title_html}'
+                f'{th_html}'
+                f'<span style="display:block;margin-top:2px">{meta}</span>'
                 f'</li>')
 
     econ_html = ""
@@ -1093,18 +1142,24 @@ def build_telegram_message(state, regime, mac_score, macro_info,
     if econ_news:
         L.append(f"\n📰 <b>ข่าวเศรษฐกิจสำคัญ</b>")
         for n in econ_news[:5]:
-            ago = _fmt_time_ago(n["ts"])
+            ago    = _fmt_time_ago(n["ts"])
+            title_th = n.get("title_th","")
             L.append(f"   • {n['title']}")
-            L.append(f"     <i>{n.get('pub','')}  {ago}</i>")
+            if title_th:
+                L.append(f"     📌 <i>{title_th}</i>")
+            L.append(f"     <i>{n.get('pub','')}  ·  {ago}</i>")
 
     # ── Tech News
     if tech_news:
         L.append(f"\n💻 <b>ข่าวหุ้นเทค</b>")
         for n in tech_news[:6]:
-            ago = _fmt_time_ago(n["ts"])
-            sym_tag = f"[{n['sym']}] " if n.get("sym") else ""
-            L.append(f"   • <b>{sym_tag}</b>{n['title']}")
-            L.append(f"     <i>{n.get('pub','')}  {ago}</i>")
+            ago      = _fmt_time_ago(n["ts"])
+            sym_tag  = f"[<b>{n['sym']}</b>] " if n.get("sym") else ""
+            title_th = n.get("title_th","")
+            L.append(f"   • {sym_tag}{n['title']}")
+            if title_th:
+                L.append(f"     📌 <i>{title_th}</i>")
+            L.append(f"     <i>{n.get('pub','')}  ·  {ago}</i>")
 
     # ── Footer
     L.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━")
