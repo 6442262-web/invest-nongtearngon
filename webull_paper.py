@@ -59,10 +59,12 @@ STOCK_ALLOC  = 0.30   # 30% ต่อตัว (3x30% = 90% invested, 10% cash)
 GOLD_ALLOC   = 0.15   # ทอง 15% (ถ้า signal ดี)
 MIN_SCORE    = 3
 
+MAG7 = ["NVDA","MSFT","AAPL","META","GOOGL","AMZN","TSLA"]
+
 WATCHLIST = [
-    "NVDA","MSFT","AAPL","META","GOOGL","AMZN",
+    "NVDA","MSFT","AAPL","META","GOOGL","AMZN","TSLA",
     "AVGO","NOW","PANW","ADBE","CRM",
-    "DDOG","NET","ZS","TSLA","MRVL","AXON","TTD",
+    "DDOG","NET","ZS","MRVL","AXON","TTD",
 ]
 MACRO_TICKERS = ["DX-Y.NYB","^VIX","^TNX","HYG","QQQ","GLD","^GSPC","THB=X"]
 
@@ -734,6 +736,112 @@ def apply_entries(state, picks, data, wb, regime="NEUTRAL", mac_score=0):
 
 
 # ─────────────────────────────────────────────────────────
+# 4b. Magnificent 7 Dashboard
+# ─────────────────────────────────────────────────────────
+
+def get_mag7_data(signals_map):
+    """ดึงข้อมูล Mag7 จาก signals ที่มีอยู่แล้ว"""
+    rows = []
+    for tk in MAG7:
+        s = signals_map.get(tk)
+        if s:
+            rows.append(s)
+        else:
+            rows.append({"ticker": tk, "price": None, "mom_1d": 0,
+                         "mom_5d": 0, "mom_10d": 0, "vol_ratio": 1,
+                         "score": 0, "above_20ma": False, "strength": "N/A"})
+    return rows
+
+
+def build_mag7_html(mag7_rows, positions):
+    """HTML card สำหรับ Magnificent 7"""
+    def bar(score):
+        filled = min(max(score, 0), 10)
+        return "█" * filled + "░" * (10 - filled)
+
+    rows_html = ""
+    for s in mag7_rows:
+        tk       = s["ticker"]
+        held     = tk in positions
+        price    = f"${s['price']:.2f}" if s.get("price") else "—"
+        m1       = s.get("mom_1d", 0)
+        m5       = s.get("mom_5d", 0)
+        m10      = s.get("mom_10d", 0)
+        vr       = s.get("vol_ratio", 1)
+        sc       = s.get("score", 0)
+        ma20     = s.get("above_20ma", False)
+
+        c1  = "#16a34a" if m1  >= 0 else "#dc2626"
+        c5  = "#16a34a" if m5  >= 0 else "#dc2626"
+        c10 = "#16a34a" if m10 >= 0 else "#dc2626"
+
+        held_badge = ("<span style='background:#dbeafe;color:#1d4ed8;"
+                      "font-size:10px;padding:1px 5px;border-radius:8px;"
+                      "margin-left:4px'>HELD</span>" if held else "")
+        ma_badge   = ("<span style='color:#16a34a;font-size:11px'>▲MA20</span>"
+                      if ma20 else
+                      "<span style='color:#9ca3af;font-size:11px'>▼MA20</span>")
+
+        rows_html += f"""
+        <tr>
+          <td style="font-weight:700;white-space:nowrap">
+            {tk}{held_badge}
+          </td>
+          <td style="font-weight:600">{price}</td>
+          <td style="color:{c1};font-weight:600">{'+' if m1>=0 else ''}{m1:.1f}%</td>
+          <td style="color:{c5};font-weight:600">{'+' if m5>=0 else ''}{m5:.1f}%</td>
+          <td style="color:{c10};font-weight:600">{'+' if m10>=0 else ''}{m10:.1f}%</td>
+          <td style="color:#6b7280">{vr:.1f}x</td>
+          <td>{ma_badge}</td>
+          <td style="font-family:monospace;font-size:11px;color:#374151">
+            <span title="score {sc}">{bar(sc)}</span> {sc}
+          </td>
+        </tr>"""
+
+    return f"""
+    <div class="card">
+      <h3>🌟 Magnificent 7</h3>
+      <table>
+        <tr>
+          <th>หุ้น</th><th>ราคา</th>
+          <th>1 วัน</th><th>5 วัน</th><th>10 วัน</th>
+          <th>Volume</th><th>Trend</th><th>Signal</th>
+        </tr>
+        {rows_html}
+      </table>
+      <p style="font-size:11px;color:#9ca3af;margin:8px 0 0">
+        HELD = ถืออยู่ในพอร์ต &nbsp;|&nbsp;
+        Volume = เทียบค่าเฉลี่ย 20 วัน &nbsp;|&nbsp;
+        Signal max = 10
+      </p>
+    </div>"""
+
+
+def build_mag7_telegram(mag7_rows, positions):
+    """ข้อความ Mag7 สำหรับ Telegram"""
+    L = ["\n🌟 <b>Magnificent 7</b>"]
+    L.append("<code>Ticker  Price     1d      5d    Vol  Score</code>")
+    for s in mag7_rows:
+        tk   = s["ticker"]
+        held = "📌" if tk in positions else "  "
+        px   = f"${s['price']:.0f}" if s.get("price") else "  —  "
+        m1   = s.get("mom_1d", 0)
+        m5   = s.get("mom_5d", 0)
+        vr   = s.get("vol_ratio", 1)
+        sc   = s.get("score", 0)
+        e1   = "🟢" if m1 >= 0 else "🔴"
+        e5   = "🟢" if m5 >= 0 else "🔴"
+        L.append(
+            f"{held}<b>{tk:<5}</b> <code>{px:>7}"
+            f"  {e1}{m1:+.1f}%"
+            f"  {e5}{m5:+.1f}%"
+            f"  {vr:.1f}x"
+            f"  {sc:>2}</code>"
+        )
+    return "\n".join(L)
+
+
+# ─────────────────────────────────────────────────────────
 # 5. Notify — Email + Telegram (optional)
 # ─────────────────────────────────────────────────────────
 
@@ -741,10 +849,11 @@ def apply_entries(state, picks, data, wb, regime="NEUTRAL", mac_score=0):
 
 def build_email_html(state, regime, mac_score, macro_info,
                      exits, entries, all_signals, gold_score, gold_info,
-                     econ_news=None, tech_news=None):
+                     econ_news=None, tech_news=None, mag7_rows=None):
     """สร้าง HTML email สวยงาม พร้อมตาราง portfolio + ข่าว"""
     econ_news = econ_news or []
     tech_news = tech_news or []
+    mag7_rows = mag7_rows or []
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
     regime_color = {
@@ -994,6 +1103,8 @@ def build_email_html(state, regime, mac_score, macro_info,
   {exits_html}
   {entries_html}
 
+  {build_mag7_html(mag7_rows, state['positions'])}
+
   <div class="card">
     <h3>🔍 หุ้นน่าสนใจ (score ≥ {MIN_SCORE})</h3>
     <table>
@@ -1129,12 +1240,13 @@ def send_telegram_chunks(message):
 
 def build_telegram_message(state, regime, mac_score, macro_info,
                            exits, entries, all_signals, gold_score, gold_info,
-                           econ_news=None, tech_news=None):
+                           econ_news=None, tech_news=None, mag7_rows=None):
     """
     สร้างข้อความสำหรับ Telegram (HTML format)
     <b>bold</b>  <i>italic</i>  <code>code</code>
     """
     econ_news = econ_news or []
+    mag7_rows = mag7_rows or []
     tech_news = tech_news or []
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
@@ -1232,6 +1344,10 @@ def build_telegram_message(state, regime, mac_score, macro_info,
         if regime in ("RISK_OFF","CRISIS"):
             L.append(f"   ตลาด{regime_th} — ถือเงินสดไว้ก่อน")
 
+    # ── Magnificent 7
+    if mag7_rows:
+        L.append(build_mag7_telegram(mag7_rows, state["positions"]))
+
     # ── Top signals watchlist
     top = sorted([s for s in all_signals if s and s["score"] >= MIN_SCORE],
                  key=lambda x: x["score"], reverse=True)[:6]
@@ -1315,8 +1431,11 @@ def run():
     gold_sc, gold_info = score_gold(data)
     signals_map = {s["ticker"]:s for s in signals}
 
-    eligible = [s for s in signals if s["score"]>=MIN_SCORE]
+    eligible  = [s for s in signals if s["score"]>=MIN_SCORE]
+    mag7_rows = get_mag7_data(signals_map)
     print(f"  eligible: {len(eligible)}/{len(signals)} | gold score={gold_sc}")
+    print(f"  Mag7: " + " | ".join(
+        f"{r['ticker']} {r['mom_1d']:+.1f}%" for r in mag7_rows if r.get("price")))
 
     # Load state
     print("\n[5/6] จัดการ portfolio...")
@@ -1369,7 +1488,7 @@ def run():
     html_body = build_email_html(
         state, regime, mac_score, macro_info,
         exits, entries, signals, gold_sc, gold_info,
-        econ_news, tech_news
+        econ_news, tech_news, mag7_rows
     )
     send_email(subject, html_body)
 
@@ -1378,7 +1497,7 @@ def run():
         tg_msg = build_telegram_message(
             state, regime, mac_score, macro_info,
             exits, entries, signals, gold_sc, gold_info,
-            econ_news, tech_news
+            econ_news, tech_news, mag7_rows
         )
         send_telegram_chunks(tg_msg)
 
