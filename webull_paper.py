@@ -68,6 +68,38 @@ WATCHLIST = [
 ]
 MACRO_TICKERS = ["DX-Y.NYB","^VIX","^TNX","HYG","QQQ","GLD","^GSPC","THB=X"]
 
+# ── Global Trend ETFs ─────────────────────────────────────
+TREND_ETFS = {
+    # ── Themes / กระแสใหม่
+    "SOXX":  "เซมิคอนดักเตอร์",
+    "BOTZ":  "หุ่นยนต์ / AI",
+    "CIBR":  "Cybersecurity",
+    "ARKK":  "Innovation / Disruptive",
+    "ICLN":  "พลังงานสะอาด",
+    "LIT":   "ลิเทียม / EV Battery",
+    "IBB":   "ไบโอเทค",
+    "ROBO":  "Robotics",
+    # ── ภูมิภาค
+    "EEM":   "ตลาดเกิดใหม่ (EM)",
+    "INDA":  "อินเดีย",
+    "FXI":   "จีน",
+    "EWJ":   "ญี่ปุ่น",
+    "EWZ":   "บราซิล",
+    "VEA":   "ตลาดพัฒนาแล้ว (Intl)",
+    # ── Sectors US
+    "XLK":   "เทคโนโลยี US",
+    "XLF":   "การเงิน US",
+    "XLE":   "พลังงาน US",
+    "XLV":   "สุขภาพ US",
+    "XLI":   "อุตสาหกรรม US",
+    "XLY":   "Consumer ตามใจ",
+    "XLC":   "สื่อสาร US",
+    # ── สินค้าโภคภัณฑ์
+    "GDX":   "ทองคำ (miners)",
+    "USO":   "น้ำมัน",
+    "COPX":  "ทองแดง",
+}
+
 
 # ─────────────────────────────────────────────────────────
 # 1. Exchange Rate
@@ -250,8 +282,8 @@ class WebullPaper:
 # ─────────────────────────────────────────────────────────
 
 def fetch_data():
-    all_tk = list(set(WATCHLIST + MACRO_TICKERS))
-    raw = yf.download(all_tk, period="2mo", interval="1d",
+    all_tk = list(set(WATCHLIST + MACRO_TICKERS + list(TREND_ETFS.keys())))
+    raw = yf.download(all_tk, period="3mo", interval="1d",
                       progress=False, auto_adjust=True, group_by="ticker")
     result = {}
     for tk in all_tk:
@@ -372,7 +404,103 @@ def score_gold(data):
 
 
 # ─────────────────────────────────────────────────────────
-# 3b. News Fetcher — Economic & Tech
+# 3b. Global Trend Scanner
+# ─────────────────────────────────────────────────────────
+
+def scan_global_trends(data):
+    """
+    สแกนเทรนด์โลกจาก ETF และแบ่งเป็น 3 กลุ่ม:
+      EMERGING  — กำลังจะขึ้น (momentum เพิ่งเริ่ม, volume สะสม)
+      RISING    — ขาขึ้นชัดเจนแล้ว
+      DECLINING — ขาลง / อ่อนแรง
+    """
+    results = []
+
+    for sym, label in TREND_ETFS.items():
+        df = data.get(sym)
+        if df is None or len(df) < 22:
+            continue
+
+        c   = df["Close"].dropna().values
+        vol = df["Volume"].dropna().values
+
+        # momentum หลายช่วง
+        def mp(back):
+            if len(c) <= back: return 0.0
+            b = float(c[-(back+1)])
+            return (float(c[-1]) - b) / b * 100 if b > 0 else 0.0
+
+        m1  = mp(1)
+        m5  = mp(5)
+        m10 = mp(10)
+        m20 = mp(20)
+        m60 = mp(60) if len(c) > 60 else mp(len(c)-1)
+
+        # volume ratio (5d vs 20d avg)
+        vr = 1.0
+        if len(vol) >= 20:
+            vr = float(vol[-5:].mean()) / float(vol[-20:].mean())
+
+        # above MA20
+        ma20 = float(c[-20:].mean()) if len(c) >= 20 else float(c.mean())
+        above_ma20 = float(c[-1]) > ma20
+
+        # above MA50
+        ma50 = float(c[-50:].mean()) if len(c) >= 50 else float(c.mean())
+        above_ma50 = float(c[-1]) > ma50
+
+        # ── classify trend phase ──────────────────────────
+        #
+        # EMERGING (กำลังจะขึ้น):
+        #   momentum 5d เพิ่งเป็นบวก (+0.5% ถึง +5%)
+        #   momentum 20d ยังไม่สูงมาก (< +10%)
+        #   volume เริ่มสูงขึ้น (vr > 1.1)
+        #   ราคาเพิ่งข้าม MA20 หรืออยู่ใกล้ MA20
+        #
+        # RISING (ขึ้นแล้ว):
+        #   momentum 5d > 3% หรือ 20d > 8%
+        #   above MA20 และ MA50
+        #
+        # DECLINING (ขาลง):
+        #   momentum 5d < -1% หรือ 20d < -5%
+
+        if m5 < -1 or m20 < -5:
+            phase = "DECLINING"
+        elif (0.3 <= m5 <= 6) and m20 < 12 and vr >= 1.1 and above_ma20:
+            phase = "EMERGING"   # ← เพิ่งเริ่ม น่าสนใจที่สุด
+        elif m5 > 3 or (m20 > 6 and above_ma20 and above_ma50):
+            phase = "RISING"
+        elif -1 <= m5 <= 0.3:
+            phase = "NEUTRAL"
+        else:
+            phase = "NEUTRAL"
+
+        # ── emerging score (ยิ่งสูง = น่าสนใจมากกว่า) ──
+        em_score = 0
+        if phase == "EMERGING":
+            em_score += (3 if 1 < m5 <= 4 else 2 if m5 > 0 else 1)
+            em_score += (2 if vr > 1.5 else 1 if vr > 1.1 else 0)
+            em_score += (1 if above_ma50 else 0)
+            em_score += (2 if 0 < m20 < 8 else 1 if -3 < m20 <= 0 else 0)
+        elif phase == "RISING":
+            em_score = -1   # ขึ้นแล้ว อาจช้าไปหน่อย
+
+        results.append(dict(
+            sym=sym, label=label, phase=phase,
+            m1=round(m1,2), m5=round(m5,2),
+            m10=round(m10,2), m20=round(m20,2), m60=round(m60,2),
+            vr=round(vr,2), above_ma20=above_ma20, above_ma50=above_ma50,
+            em_score=em_score, price=round(float(c[-1]),2),
+        ))
+
+    # จัดเรียง: EMERGING (em_score สูง) → RISING → NEUTRAL → DECLINING
+    phase_order = {"EMERGING":0,"RISING":1,"NEUTRAL":2,"DECLINING":3}
+    results.sort(key=lambda x: (phase_order.get(x["phase"],3), -x["em_score"]))
+    return results
+
+
+# ─────────────────────────────────────────────────────────
+# 3c. News Fetcher — Economic & Tech
 # ─────────────────────────────────────────────────────────
 
 # คีย์เวิร์ดกรองข่าวเศรษฐกิจ
@@ -753,6 +881,100 @@ def get_mag7_data(signals_map):
     return rows
 
 
+def build_trend_html(trends):
+    """HTML card สำหรับ Global Trend Scanner"""
+    if not trends:
+        return ""
+
+    phase_cfg = {
+        "EMERGING":  ("#f0fdf4", "#16a34a", "🌱 กำลังจะขึ้น"),
+        "RISING":    ("#eff6ff", "#2563eb", "🚀 ขึ้นแล้ว"),
+        "NEUTRAL":   ("#f9fafb", "#6b7280", "➡️  ทรงตัว"),
+        "DECLINING": ("#fff1f2", "#dc2626", "📉 ขาลง"),
+    }
+
+    # แยก group
+    groups = {"EMERGING":[], "RISING":[], "NEUTRAL":[], "DECLINING":[]}
+    for t in trends:
+        groups.get(t["phase"], groups["NEUTRAL"]).append(t)
+
+    def trend_row(t):
+        bg, color, _ = phase_cfg.get(t["phase"], phase_cfg["NEUTRAL"])
+        c5  = "#16a34a" if t["m5"]  >= 0 else "#dc2626"
+        c20 = "#16a34a" if t["m20"] >= 0 else "#dc2626"
+        vr_color = "#16a34a" if t["vr"] >= 1.3 else "#6b7280"
+        ma_badge = ("▲" if t["above_ma20"] else "▼")
+        ma_color = "#16a34a" if t["above_ma20"] else "#dc2626"
+        return f"""<tr style="background:{bg}">
+          <td style="font-weight:700;color:{color}">{t['sym']}</td>
+          <td style="font-size:12px;color:#374151">{t['label']}</td>
+          <td style="color:{c5};font-weight:600">{'+' if t['m5']>=0 else ''}{t['m5']:.1f}%</td>
+          <td style="color:{c20};font-weight:600">{'+' if t['m20']>=0 else ''}{t['m20']:.1f}%</td>
+          <td style="color:{vr_color}">{t['vr']:.1f}x</td>
+          <td style="color:{ma_color};font-weight:700">{ma_badge}MA20</td>
+        </tr>"""
+
+    sections = ""
+    for phase in ["EMERGING","RISING","NEUTRAL","DECLINING"]:
+        items = groups[phase]
+        if not items: continue
+        _, color, label = phase_cfg[phase]
+        rows = "".join(trend_row(t) for t in items)
+        sections += f"""
+        <div style="margin-bottom:12px">
+          <div style="font-weight:700;color:{color};margin-bottom:4px">{label}</div>
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <tr style="color:#9ca3af;font-size:11px">
+              <th style="text-align:left;padding:4px 8px">ETF</th>
+              <th style="text-align:left;padding:4px 8px">กลุ่ม</th>
+              <th style="padding:4px 8px">5 วัน</th>
+              <th style="padding:4px 8px">20 วัน</th>
+              <th style="padding:4px 8px">Volume</th>
+              <th style="padding:4px 8px">Trend</th>
+            </tr>
+            {rows}
+          </table>
+        </div>"""
+
+    emerging_count = len(groups["EMERGING"])
+    note = (f'<p style="font-size:11px;color:#6b7280;margin:8px 0 0">'
+            f'🌱 พบ {emerging_count} เทรนด์ที่กำลังจะขึ้น '
+            f'— Volume > 1.3x + ผ่าน MA20 = สัญญาณสะสม</p>')
+
+    return f"""
+    <div class="card">
+      <h3>🌍 Global Trend Scanner</h3>
+      {sections}
+      {note}
+    </div>"""
+
+
+def build_trend_telegram(trends):
+    """Telegram text สำหรับ Global Trend"""
+    if not trends:
+        return ""
+    L = ["\n🌍 <b>Global Trend Scanner</b>"]
+
+    emerging = [t for t in trends if t["phase"] == "EMERGING"]
+    rising   = [t for t in trends if t["phase"] == "RISING"]
+
+    if emerging:
+        L.append("🌱 <b>กำลังจะขึ้น</b>")
+        for t in emerging:
+            L.append(f"   <b>{t['sym']}</b> {t['label']}")
+            L.append(f"   5d <b>{t['m5']:+.1f}%</b>  20d <b>{t['m20']:+.1f}%</b>"
+                     f"  vol <b>{t['vr']:.1f}x</b>"
+                     f"  {'▲' if t['above_ma20'] else '▼'}MA20")
+
+    if rising:
+        L.append("🚀 <b>ขึ้นแล้ว</b>")
+        for t in rising[:5]:
+            L.append(f"   <b>{t['sym']}</b> {t['label']}"
+                     f"  5d <b>{t['m5']:+.1f}%</b>  20d <b>{t['m20']:+.1f}%</b>")
+
+    return "\n".join(L)
+
+
 def build_mag7_html(mag7_rows, positions):
     """HTML card สำหรับ Magnificent 7"""
     def bar(score):
@@ -849,11 +1071,12 @@ def build_mag7_telegram(mag7_rows, positions):
 
 def build_email_html(state, regime, mac_score, macro_info,
                      exits, entries, all_signals, gold_score, gold_info,
-                     econ_news=None, tech_news=None, mag7_rows=None):
+                     econ_news=None, tech_news=None, mag7_rows=None, trends=None):
     """สร้าง HTML email สวยงาม พร้อมตาราง portfolio + ข่าว"""
     econ_news = econ_news or []
     tech_news = tech_news or []
     mag7_rows = mag7_rows or []
+    trends    = trends or []
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
     regime_color = {
@@ -1103,6 +1326,8 @@ def build_email_html(state, regime, mac_score, macro_info,
   {exits_html}
   {entries_html}
 
+  {build_trend_html(trends)}
+
   {build_mag7_html(mag7_rows, state['positions'])}
 
   <div class="card">
@@ -1240,13 +1465,14 @@ def send_telegram_chunks(message):
 
 def build_telegram_message(state, regime, mac_score, macro_info,
                            exits, entries, all_signals, gold_score, gold_info,
-                           econ_news=None, tech_news=None, mag7_rows=None):
+                           econ_news=None, tech_news=None, mag7_rows=None, trends=None):
     """
     สร้างข้อความสำหรับ Telegram (HTML format)
     <b>bold</b>  <i>italic</i>  <code>code</code>
     """
     econ_news = econ_news or []
     mag7_rows = mag7_rows or []
+    trends    = trends or []
     tech_news = tech_news or []
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
@@ -1344,6 +1570,10 @@ def build_telegram_message(state, regime, mac_score, macro_info,
         if regime in ("RISK_OFF","CRISIS"):
             L.append(f"   ตลาด{regime_th} — ถือเงินสดไว้ก่อน")
 
+    # ── Global Trends
+    if trends:
+        L.append(build_trend_telegram(trends))
+
     # ── Magnificent 7
     if mag7_rows:
         L.append(build_mag7_telegram(mag7_rows, state["positions"]))
@@ -1433,9 +1663,13 @@ def run():
 
     eligible  = [s for s in signals if s["score"]>=MIN_SCORE]
     mag7_rows = get_mag7_data(signals_map)
+    trends    = scan_global_trends(data)
+    emerging  = [t for t in trends if t["phase"] == "EMERGING"]
+    rising    = [t for t in trends if t["phase"] == "RISING"]
     print(f"  eligible: {len(eligible)}/{len(signals)} | gold score={gold_sc}")
     print(f"  Mag7: " + " | ".join(
         f"{r['ticker']} {r['mom_1d']:+.1f}%" for r in mag7_rows if r.get("price")))
+    print(f"  Trends: 🌱 {len(emerging)} emerging | 🚀 {len(rising)} rising")
 
     # Load state
     print("\n[5/6] จัดการ portfolio...")
@@ -1488,7 +1722,7 @@ def run():
     html_body = build_email_html(
         state, regime, mac_score, macro_info,
         exits, entries, signals, gold_sc, gold_info,
-        econ_news, tech_news, mag7_rows
+        econ_news, tech_news, mag7_rows, trends
     )
     send_email(subject, html_body)
 
@@ -1497,7 +1731,7 @@ def run():
         tg_msg = build_telegram_message(
             state, regime, mac_score, macro_info,
             exits, entries, signals, gold_sc, gold_info,
-            econ_news, tech_news, mag7_rows
+            econ_news, tech_news, mag7_rows, trends
         )
         send_telegram_chunks(tg_msg)
 
