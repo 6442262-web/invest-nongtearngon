@@ -54,8 +54,8 @@ THB_USD_RATE    = None   # auto-fetch from Yahoo Finance
 SL_PCT       = 0.10   # Stop Loss 10%
 TP_PCT       = 0.25   # Take Profit 25%
 TRAIL_PCT    = 0.07   # Trailing Stop 7%
-MAX_SLOTS    = 3      # ถือได้ 3 ตัวพร้อมกัน
-STOCK_ALLOC  = 0.30   # 30% ต่อตัว (3x30% = 90% invested, 10% cash)
+MAX_SLOTS    = 1      # ซื้อแค่ตัวที่ดีที่สุดตัวเดียว
+STOCK_ALLOC  = 0.70   # 70% ลงในตัวที่เลือก (เงินสดสำรอง 30%)
 GOLD_ALLOC   = 0.15   # ทอง 15% (ถ้า signal ดี)
 MIN_SCORE    = 3
 
