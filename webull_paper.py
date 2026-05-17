@@ -70,34 +70,27 @@ MACRO_TICKERS = ["DX-Y.NYB","^VIX","^TNX","HYG","QQQ","GLD","^GSPC","THB=X"]
 
 # ── Global Trend ETFs ─────────────────────────────────────
 TREND_ETFS = {
-    # ── Themes / กระแสใหม่
+    # ── US Sectors
+    "XLK":   "เทคโนโลยี",
+    "XLC":   "สื่อสาร",
+    "XLY":   "Consumer ตามใจ",
+    "XLF":   "การเงิน",
+    "XLV":   "สุขภาพ",
+    "XLI":   "อุตสาหกรรม",
+    "XLE":   "พลังงาน",
+    "XLP":   "Consumer จำเป็น",
+    "XLB":   "วัสดุ",
+    "XLRE":  "อสังหาริมทรัพย์",
+    # ── US Themes
     "SOXX":  "เซมิคอนดักเตอร์",
     "BOTZ":  "หุ่นยนต์ / AI",
     "CIBR":  "Cybersecurity",
-    "ARKK":  "Innovation / Disruptive",
-    "ICLN":  "พลังงานสะอาด",
-    "LIT":   "ลิเทียม / EV Battery",
+    "ARKK":  "Innovation",
     "IBB":   "ไบโอเทค",
-    "ROBO":  "Robotics",
-    # ── ภูมิภาค
-    "EEM":   "ตลาดเกิดใหม่ (EM)",
-    "INDA":  "อินเดีย",
-    "FXI":   "จีน",
-    "EWJ":   "ญี่ปุ่น",
-    "EWZ":   "บราซิล",
-    "VEA":   "ตลาดพัฒนาแล้ว (Intl)",
-    # ── Sectors US
-    "XLK":   "เทคโนโลยี US",
-    "XLF":   "การเงิน US",
-    "XLE":   "พลังงาน US",
-    "XLV":   "สุขภาพ US",
-    "XLI":   "อุตสาหกรรม US",
-    "XLY":   "Consumer ตามใจ",
-    "XLC":   "สื่อสาร US",
-    # ── สินค้าโภคภัณฑ์
+    "ICLN":  "พลังงานสะอาด",
+    "LIT":   "EV / ลิเทียม",
     "GDX":   "ทองคำ (miners)",
     "USO":   "น้ำมัน",
-    "COPX":  "ทองแดง",
 }
 
 
