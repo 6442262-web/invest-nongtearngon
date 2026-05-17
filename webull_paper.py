@@ -542,6 +542,77 @@ def save_state(state):
     with open("paper_state.json","w") as f:
         json.dump(state, f, indent=2, default=str)
 
+def build_sell_reason(reason_code, pos, cur_price, peak, regime, sig):
+    """สร้างเหตุผลการขายแบบละเอียด"""
+    entry     = pos["entry_price"]
+    pnl_pct   = (cur_price - entry) / entry * 100
+    hold_days = pos.get("hold_days", 0)
+    parts     = []
+
+    if "STOP LOSS" in reason_code:
+        parts.append(f"ราคาร่วงลง {abs(pnl_pct):.1f}% ถึงจุด Stop Loss ที่ ${cur_price:.2f}")
+        parts.append(f"ตัดขาดทุนเพื่อปกป้องพอร์ต (SL ตั้งไว้ {SL_PCT*100:.0f}%)")
+
+    elif "TAKE PROFIT" in reason_code:
+        parts.append(f"ราคาขึ้น {pnl_pct:.1f}% ถึงเป้า Take Profit ที่ ${cur_price:.2f}")
+        parts.append(f"ล็อคกำไรตามแผน (TP ตั้งไว้ {TP_PCT*100:.0f}%)")
+
+    elif "TRAILING" in reason_code:
+        drop_from_peak = (cur_price - peak) / peak * 100
+        parts.append(f"ราคาร่วงจากจุดสูงสุด ${peak:.2f} ลงมา {abs(drop_from_peak):.1f}%")
+        parts.append(f"Trailing Stop เตะที่ {TRAIL_PCT*100:.0f}% จาก peak — ล็อคกำไรบางส่วน")
+
+    elif "REGIME" in reason_code:
+        parts.append(f"สภาวะตลาดเปลี่ยนเป็น {regime} — ความเสี่ยงสูงขึ้น")
+        parts.append(f"ถือมาแล้ว {hold_days} วัน ออกก่อนตลาดแย่ลงต่อ")
+
+    elif "SIGNAL" in reason_code:
+        sc = sig["score"] if sig else "?"
+        parts.append(f"Signal กลับทิศ — score ลดลงเหลือ {sc} (ต่ำกว่า 0)")
+        parts.append(f"แรงซื้อหายไป momentum อ่อนแล้ว")
+
+    parts.append(f"ถือ {hold_days} วัน | ซื้อ ${entry:.2f} → ขาย ${cur_price:.2f}")
+    return parts
+
+
+def build_buy_reason(sig, regime, mac_score):
+    """สร้างเหตุผลการซื้อแบบละเอียด"""
+    parts = []
+
+    # 1. Macro
+    regime_th = {"STRONG_ON":"แข็งแกร่งมาก","RISK_ON":"ขาขึ้น",
+                 "NEUTRAL":"ทรงตัว"}.get(regime, regime)
+    parts.append(f"ตลาดอยู่ในโหมด {regime_th} (macro score {mac_score:+d})")
+
+    # 2. Momentum
+    mom_parts = []
+    if sig.get("mom_1d", 0) > 0.5:
+        mom_parts.append(f"วันนี้ +{sig['mom_1d']:.1f}%")
+    if sig.get("mom_5d", 0) > 1:
+        mom_parts.append(f"5 วัน +{sig['mom_5d']:.1f}%")
+    if sig.get("mom_10d", 0) > 3:
+        mom_parts.append(f"10 วัน +{sig['mom_10d']:.1f}%")
+    if mom_parts:
+        parts.append("Momentum ขาขึ้น: " + " | ".join(mom_parts))
+
+    # 3. Volume
+    vr = sig.get("vol_ratio", 1)
+    if vr > 2:
+        parts.append(f"ปริมาณซื้อขายพุ่ง {vr:.1f}x เหนือค่าเฉลี่ย — มีแรงซื้อเข้าแรง")
+    elif vr > 1.3:
+        parts.append(f"ปริมาณซื้อขายสูงกว่าปกติ {vr:.1f}x")
+
+    # 4. MA20
+    if sig.get("above_20ma"):
+        parts.append("ราคาอยู่เหนือ MA20 — trend ยังเป็นขาขึ้น")
+
+    # 5. Score summary
+    strength = sig.get("strength", "")
+    parts.append(f"Signal strength: {strength} (score {sig['score']})")
+
+    return parts
+
+
 def check_exits(state, signals_map, regime):
     """ตรวจสอบว่า position ไหนควรปิด"""
     exits = []
@@ -555,26 +626,28 @@ def check_exits(state, signals_map, regime):
         if cur_price > peak:
             pos["peak_price"] = cur_price
 
-        reason = None
+        reason_code = None
         if cur_price <= entry*(1-SL_PCT):
-            reason = f"STOP LOSS (-{SL_PCT*100:.0f}%)"
+            reason_code = f"STOP LOSS (-{SL_PCT*100:.0f}%)"
         elif cur_price >= entry*(1+TP_PCT):
-            reason = f"TAKE PROFIT (+{TP_PCT*100:.0f}%)"
+            reason_code = f"TAKE PROFIT (+{TP_PCT*100:.0f}%)"
         elif cur_price <= peak*(1-TRAIL_PCT):
-            reason = f"TRAILING STOP ({TRAIL_PCT*100:.0f}% จาก peak)"
+            reason_code = f"TRAILING STOP ({TRAIL_PCT*100:.0f}% จาก peak)"
         elif regime in ("RISK_OFF","CRISIS") and pos.get("hold_days",0) >= 2:
-            reason = "REGIME_EXIT (ตลาดเป็นขาลง)"
+            reason_code = "REGIME_EXIT (ตลาดเป็นขาลง)"
         elif sig and sig["score"] < -1:
-            reason = "SIGNAL_REVERSAL (สัญญาณกลับ)"
+            reason_code = "SIGNAL_REVERSAL (สัญญาณกลับ)"
 
         hold_days = (datetime.now() - datetime.fromisoformat(pos["entry_date"])).days
         pos["hold_days"] = hold_days
 
-        if reason:
+        if reason_code:
             pnl_pct = (cur_price - entry)/entry*100
             pnl_thb = pos["size_thb"] * pnl_pct/100
+            reason_detail = build_sell_reason(reason_code, pos, cur_price, peak, regime, sig)
             exits.append({
-                "ticker": tk, "reason": reason,
+                "ticker": tk, "reason": reason_code,
+                "reason_detail": reason_detail,
                 "entry": entry, "exit_price": cur_price,
                 "pnl_pct": round(pnl_pct,2),
                 "pnl_thb": round(pnl_thb,0),
@@ -608,7 +681,7 @@ def apply_exits(state, exits, wb):
         del state["positions"][tk]
         print(f"  CLOSED {tk}: {ex['pnl_pct']:+.2f}% | {fmt_thb(ex['pnl_thb'])}")
 
-def apply_entries(state, picks, data, wb):
+def apply_entries(state, picks, data, wb, regime="NEUTRAL", mac_score=0):
     """เปิด positions ใหม่"""
     entries = []
     for sig in picks:
@@ -632,6 +705,8 @@ def apply_entries(state, picks, data, wb):
         else:
             result = {"entry": "SIMULATED"}
 
+        reason_detail = build_buy_reason(sig, regime, mac_score)
+
         state["cash_thb"] -= size_thb
         state["positions"][tk] = {
             "entry_price": sig["price"],
@@ -645,8 +720,13 @@ def apply_entries(state, picks, data, wb):
             "tp_price":    round(sig["price"]*(1+TP_PCT),2),
             "order_result": str(result),
         }
-        entries.append({"ticker":tk, "price":sig["price"],
-                        "size_thb":size_thb, "score":sig["score"]})
+        entries.append({
+            "ticker": tk, "price": sig["price"],
+            "size_thb": size_thb, "score": sig["score"],
+            "reason_detail": reason_detail,
+            "mom_1d": sig.get("mom_1d",0), "mom_5d": sig.get("mom_5d",0),
+            "vol_ratio": sig.get("vol_ratio",1), "strength": sig.get("strength",""),
+        })
         print(f"  BOUGHT {tk} @ ${sig['price']:.2f} | {fmt_thb(size_thb)} (score={sig['score']})")
         time.sleep(0.3)
 
@@ -792,48 +872,74 @@ def build_email_html(state, regime, mac_score, macro_info,
         pos_html = "<p style='color:#6b7280'>ไม่มี position เปิดอยู่</p>"
 
     # ── Exits table ──
+    # ── Exits ──
     exits_html = ""
     if exits:
-        ex_rows = "".join(f"""
-        <tr>
-          <td><b>{ex['ticker']}</b></td>
-          <td>${ex['entry']:.2f}</td>
-          <td>${ex['exit_price']:.2f}</td>
-          <td class="{pnl_cls(ex['pnl_pct'])}">{sign(ex['pnl_pct'])}{ex['pnl_pct']:.2f}%</td>
-          <td class="{pnl_cls(ex['pnl_thb'])}">{fmt_thb(ex['pnl_thb'])}</td>
-          <td>{ex['hold_days']} วัน</td>
-          <td>{ex['reason']}</td>
-        </tr>""" for ex in exits)
+        ex_cards = ""
+        for ex in exits:
+            icon      = "✅" if ex["pnl_thb"] >= 0 else "❌"
+            border    = "#16a34a" if ex["pnl_thb"] >= 0 else "#dc2626"
+            detail_li = "".join(f"<li>{d}</li>" for d in ex.get("reason_detail",[]))
+            ex_cards += f"""
+            <div style="border-left:4px solid {border};padding:10px 14px;
+                        margin-bottom:12px;background:#f9fafb;border-radius:0 8px 8px 0">
+              <div style="font-size:15px;font-weight:700">
+                {icon} {ex['ticker']}
+                <span class="{pnl_cls(ex['pnl_pct'])}" style="margin-left:8px">
+                  {sign(ex['pnl_pct'])}{ex['pnl_pct']:.2f}%
+                </span>
+                <span style="color:#6b7280;font-size:13px;font-weight:400;margin-left:6px">
+                  {fmt_thb(ex['pnl_thb'])}
+                </span>
+              </div>
+              <div style="font-size:12px;color:#6b7280;margin:2px 0 6px">
+                ซื้อ ${ex['entry']:.2f} → ขาย ${ex['exit_price']:.2f}
+                &nbsp;·&nbsp; ถือ {ex['hold_days']} วัน
+                &nbsp;·&nbsp; <b>{ex['reason']}</b>
+              </div>
+              <ul style="margin:4px 0 0;padding-left:16px;font-size:13px;color:#374151;line-height:1.8">
+                {detail_li}
+              </ul>
+            </div>"""
         exits_html = f"""
         <div class="card">
-          <h3>🔔 ปิด Position วันนี้ ({len(exits)} ตัว)</h3>
-          <table>
-            <tr><th>หุ้น</th><th>ซื้อ</th><th>ขาย</th>
-                <th>%</th><th>กำไร (฿)</th><th>ถือ</th><th>เหตุผล</th></tr>
-            {ex_rows}
-          </table>
+          <h3>🔔 ขายออก / ปิด Position วันนี้ ({len(exits)} ตัว)</h3>
+          {ex_cards}
         </div>"""
 
     # ── New entries ──
     entries_html = ""
     if entries:
-        en_rows = "".join(f"""
-        <tr>
-          <td><b>{en['ticker']}</b></td>
-          <td>${en['price']:.2f}</td>
-          <td>{fmt_thb(en['size_thb'])} (~{fmt_usd(thb_to_usd(en['size_thb']))})</td>
-          <td>${en['price']*(1-SL_PCT):.2f}</td>
-          <td>${en['price']*(1+TP_PCT):.2f}</td>
-          <td>score {en['score']}</td>
-        </tr>""" for en in entries)
+        en_cards = ""
+        for en in entries:
+            detail_li = "".join(f"<li>{d}</li>" for d in en.get("reason_detail",[]))
+            en_cards += f"""
+            <div style="border-left:4px solid #2563eb;padding:10px 14px;
+                        margin-bottom:12px;background:#eff6ff;border-radius:0 8px 8px 0">
+              <div style="font-size:15px;font-weight:700;color:#1e40af">
+                🛒 BUY {en['ticker']}
+                <span style="font-size:13px;font-weight:400;color:#374151;margin-left:8px">
+                  @ ${en['price']:.2f}
+                  &nbsp;·&nbsp; {fmt_thb(en['size_thb'])} (~{fmt_usd(thb_to_usd(en['size_thb']))})
+                </span>
+              </div>
+              <div style="font-size:12px;color:#6b7280;margin:2px 0 6px">
+                🛑 SL ${en['price']*(1-SL_PCT):.2f}
+                &nbsp;·&nbsp; 🎯 TP ${en['price']*(1+TP_PCT):.2f}
+                &nbsp;·&nbsp; 📉 Trail {int(TRAIL_PCT*100)}%
+                &nbsp;·&nbsp; Score {en['score']} ({en.get('strength','')})
+              </div>
+              <div style="font-size:13px;font-weight:600;color:#1e40af;margin-bottom:4px">
+                📋 เหตุผลที่ซื้อ:
+              </div>
+              <ul style="margin:0;padding-left:16px;font-size:13px;color:#374151;line-height:1.8">
+                {detail_li}
+              </ul>
+            </div>"""
         entries_html = f"""
         <div class="card">
           <h3>🛒 ซื้อใหม่วันนี้ — รอตลาดเปิด 20:30 น.</h3>
-          <table>
-            <tr><th>หุ้น</th><th>ราคา</th><th>ลงทุน</th>
-                <th>🛑 SL</th><th>🎯 TP</th><th>Signal</th></tr>
-            {en_rows}
-          </table>
+          {en_cards}
         </div>"""
     else:
         no_entry_note = ""
@@ -1096,12 +1202,16 @@ def build_telegram_message(state, regime, mac_score, macro_info,
 
     # ── Exits today
     if exits:
-        L.append(f"\n🔔 <b>ปิด Position วันนี้</b>  ({len(exits)} ตัว)")
+        L.append(f"\n🔔 <b>ขายออก / ปิด Position วันนี้</b>  ({len(exits)} ตัว)")
         for ex in exits:
             icon = "✅" if ex["pnl_thb"] >= 0 else "❌"
-            L.append(f"   {icon} <b>{ex['ticker']}</b>  {ex['pnl_pct']:+.2f}%"
+            L.append(f"\n   {icon} <b>{ex['ticker']}</b>  {ex['pnl_pct']:+.2f}%"
                      f"  │  {fmt_thb(ex['pnl_thb'])}")
-            L.append(f"      📌 {ex['reason']}")
+            L.append(f"      ซื้อ ${ex['entry']:.2f} → ขาย ${ex['exit_price']:.2f}"
+                     f"  ({ex['hold_days']} วัน)")
+            L.append(f"      <b>สาเหตุ: {ex['reason']}</b>")
+            for d in ex.get("reason_detail", []):
+                L.append(f"      • {d}")
 
     # ── New entries
     if entries:
@@ -1114,6 +1224,9 @@ def build_telegram_message(state, regime, mac_score, macro_info,
             L.append(f"      🛑 SL <code>${en['price']*(1-SL_PCT):.2f}</code>"
                      f"  🎯 TP <code>${en['price']*(1+TP_PCT):.2f}</code>"
                      f"  📉 Trail {int(TRAIL_PCT*100)}%")
+            L.append(f"      <b>📋 เหตุผลที่ซื้อ:</b>")
+            for d in en.get("reason_detail", []):
+                L.append(f"      • {d}")
     else:
         L.append(f"\n💤 <b>ไม่มีการซื้อใหม่</b>")
         if regime in ("RISK_OFF","CRISIS"):
@@ -1232,7 +1345,7 @@ def run():
         slots = MAX_SLOTS - len(state["positions"])
         picks = candidates[:slots]
 
-    entries = apply_entries(state, picks, data, wb)
+    entries = apply_entries(state, picks, data, wb, regime, mac_score)
 
     # Update portfolio value
     state["last_updated"] = datetime.now().isoformat()
