@@ -93,6 +93,83 @@ TREND_ETFS = {
     "USO":   "น้ำมัน",
 }
 
+# ── Economic Sector Profile (per stock) ──────────────────
+# ใช้จับคู่กับ Economic Cycle Phase เพื่อให้/หักคะแนน
+STOCK_ECON_SECTOR = {
+    "NVDA":  "semiconductor",
+    "MSFT":  "mega_cap_tech",
+    "AAPL":  "mega_cap_tech",
+    "META":  "digital_media",
+    "GOOGL": "mega_cap_tech",
+    "AMZN":  "consumer_disc",
+    "TSLA":  "ev_auto",
+    "AVGO":  "semiconductor",
+    "NOW":   "enterprise_soft",
+    "PANW":  "cybersecurity",
+    "ADBE":  "enterprise_soft",
+    "CRM":   "enterprise_soft",
+    "DDOG":  "cloud_growth",
+    "NET":   "cloud_growth",
+    "ZS":    "cybersecurity",
+    "MRVL":  "semiconductor",
+    "AXON":  "defense_tech",
+    "TTD":   "adtech",
+}
+
+# Bonus ตาม Sector × Economic Phase
+# +2 = ชัดเจนว่าได้ประโยชน์ | +1 = เอื้อ | 0 = กลาง | -1 = กดดัน | -2 = หลีกเลี่ยง
+SECTOR_PHASE_BONUS = {
+    "semiconductor":   {"RECOVERY":3,"EXPANSION":2,"LATE_CYCLE":0,"SLOWDOWN":-1,"CONTRACTION":-2},
+    "mega_cap_tech":   {"RECOVERY":2,"EXPANSION":2,"LATE_CYCLE":1,"SLOWDOWN": 0,"CONTRACTION":-1},
+    "cloud_growth":    {"RECOVERY":3,"EXPANSION":2,"LATE_CYCLE":-1,"SLOWDOWN":-2,"CONTRACTION":-3},
+    "cybersecurity":   {"RECOVERY":2,"EXPANSION":2,"LATE_CYCLE": 1,"SLOWDOWN": 0,"CONTRACTION":-1},
+    "enterprise_soft": {"RECOVERY":2,"EXPANSION":2,"LATE_CYCLE": 0,"SLOWDOWN":-1,"CONTRACTION":-2},
+    "digital_media":   {"RECOVERY":1,"EXPANSION":2,"LATE_CYCLE": 0,"SLOWDOWN":-1,"CONTRACTION":-2},
+    "consumer_disc":   {"RECOVERY":1,"EXPANSION":2,"LATE_CYCLE":-1,"SLOWDOWN":-2,"CONTRACTION":-3},
+    "ev_auto":         {"RECOVERY":1,"EXPANSION":2,"LATE_CYCLE":-1,"SLOWDOWN":-2,"CONTRACTION":-3},
+    "defense_tech":    {"RECOVERY":0,"EXPANSION":1,"LATE_CYCLE": 1,"SLOWDOWN": 1,"CONTRACTION": 0},
+    "adtech":          {"RECOVERY":1,"EXPANSION":2,"LATE_CYCLE": 0,"SLOWDOWN":-2,"CONTRACTION":-2},
+}
+
+# ── Econ Phase → sector แนะนำ ────────────────────────────
+PHASE_GUIDE = {
+    "RECOVERY":    {
+        "th": "ฟื้นตัว 🌱",
+        "color": "#16a34a",
+        "favored": ["Tech/Growth","Semiconductor","Cloud","Cybersecurity"],
+        "avoid":   ["Utilities","Gold","Bonds"],
+        "reason":  "ดอกเบี้ยผ่านจุดสูงสุดแล้ว / credit กำลังดีขึ้น → เน้น High-Growth Tech",
+    },
+    "EXPANSION":   {
+        "th": "ขยายตัว 🚀",
+        "color": "#2563eb",
+        "favored": ["All Tech","Consumer","Energy","Industrials"],
+        "avoid":   ["Bonds","Gold"],
+        "reason":  "เศรษฐกิจโต earnings แข็งแกร่ง → ลงทุนได้กว้างขึ้น รวม cyclicals",
+    },
+    "LATE_CYCLE":  {
+        "th": "ปลายวัฏจักร ⚠️",
+        "color": "#d97706",
+        "favored": ["Mega Cap","Profitable Tech","Cybersecurity (defensive)"],
+        "avoid":   ["Unprofitable Growth","High Valuation","Small Cap"],
+        "reason":  "ดอกเบี้ยสูง / margin กดดัน → เลือกเฉพาะ Quality มี Free Cash Flow สูง",
+    },
+    "SLOWDOWN":    {
+        "th": "ชะลอตัว 🛑",
+        "color": "#dc2626",
+        "favored": ["Defensive","Dividend","Cash"],
+        "avoid":   ["Cyclical","High-Beta Growth","EV"],
+        "reason":  "GDP ชะลอ consumer อ่อนแอ → เน้น Defensive / รอจังหวะดีกว่านี้",
+    },
+    "CONTRACTION": {
+        "th": "หดตัว 🚨",
+        "color": "#7f1d1d",
+        "favored": ["Cash","Gold","Short-term Bonds"],
+        "avoid":   ["All Equities","Crypto"],
+        "reason":  "ตลาดปรับฐานลึก → ถือ Cash/Gold ดีกว่าหุ้น รอ Recovery",
+    },
+}
+
 
 # ─────────────────────────────────────────────────────────
 # 1. Exchange Rate
@@ -356,7 +433,89 @@ def get_macro(data):
     else:           regime="CRISIS"
     return regime, score, info
 
-def score_stock(tk, df, data):
+def get_econ_cycle(macro_info, data):
+    """
+    วิเคราะห์วัฏจักรเศรษฐกิจ (Economic Cycle Phase)
+    ใช้: 10Y Yield, Credit Spreads (HYG), QQQ Momentum, VIX, Gold, DXY
+    คืนค่า: (econ_phase, econ_score, econ_detail)
+    """
+    y10     = macro_info.get("yield_10y", 4.5)
+    vix     = macro_info.get("vix", 20)
+    qqq_5d  = macro_info.get("qqq_5d", 0)
+    hyg_5d  = macro_info.get("hyg_5d", 0)
+    gold_5d = macro_info.get("gold_5d", 0)
+    sp1d    = macro_info.get("sp500_1d", 0)
+
+    score  = 0
+    detail = {}
+
+    # ── 1. Interest Rate Environment ──────────────────────
+    # ต่ำ = กระตุ้นเศรษฐกิจ | สูง = กดดัน Growth stocks
+    if   y10 < 3.0: rate_env = "ต่ำมาก (กระตุ้น)"; score += 3
+    elif y10 < 4.0: rate_env = "ต่ำ (เอื้อ)";     score += 2
+    elif y10 < 4.5: rate_env = "ปานกลาง";          score += 1
+    elif y10 < 5.0: rate_env = "สูง (กดดัน)";      score -= 1
+    else:           rate_env = "สูงมาก (ระวัง)";   score -= 3
+    detail["rate_env"] = rate_env
+    detail["yield_10y"] = round(y10, 2)
+
+    # ── 2. Credit Conditions (HYG) ────────────────────────
+    # HYG ↑ = credit spreads แคบลง = ตลาดกล้าเสี่ยง
+    # HYG ↓ = credit spreads กว้าง = ตลาดกลัว
+    if   hyg_5d > 0.5:  credit = "ผ่อนคลาย 🟢"; score += 2
+    elif hyg_5d > 0:    credit = "ปกติ";          score += 1
+    elif hyg_5d < -1:   credit = "ตึงตัว 🔴";    score -= 2
+    else:               credit = "ระวัง 🟡";      score -= 1
+    detail["credit"] = credit
+
+    # ── 3. Growth Momentum (QQQ) ──────────────────────────
+    if   qqq_5d > 4:    growth = "แข็งแกร่งมาก"; score += 3
+    elif qqq_5d > 2:    growth = "ขยายตัวดี";    score += 2
+    elif qqq_5d > 0:    growth = "ขยายตัว";      score += 1
+    elif qqq_5d < -4:   growth = "หดตัวรุนแรง"; score -= 3
+    elif qqq_5d < -2:   growth = "หดตัว";        score -= 2
+    else:               growth = "ชะลอ";          score -= 1
+    detail["growth"] = growth
+
+    # ── 4. Risk Sentiment (VIX + Gold) ────────────────────
+    if   vix < 15:                     sentiment = "โลภ (ความเสี่ยงต่ำ)";      score += 2
+    elif vix < 20:                     sentiment = "ปกติ";                      score += 1
+    elif vix < 28:                     sentiment = "ระวัง (Volatility สูง)";   score -= 1
+    elif vix < 35:                     sentiment = "กลัว";                     score -= 2
+    else:                              sentiment = "ตื่นตกใจ (VIX > 35)";      score -= 4
+    if gold_5d > 3 and vix > 22:       sentiment += " + ทองพุ่ง → Hedge mode"; score -= 1
+    detail["sentiment"] = sentiment
+
+    # ── 5. Equity Momentum ────────────────────────────────
+    if   sp1d > 1:    detail["equity_mom"] = "Breakout ขึ้น";  score += 1
+    elif sp1d > 0:    detail["equity_mom"] = "ขึ้นเล็กน้อย"
+    elif sp1d < -1.5: detail["equity_mom"] = "ร่วงรุนแรง";    score -= 2
+    elif sp1d < 0:    detail["equity_mom"] = "ลดลงเล็กน้อย";  score -= 1
+    else:             detail["equity_mom"] = "ทรงตัว"
+
+    # ── Classify Phase ────────────────────────────────────
+    if   score >= 7:  econ_phase = "RECOVERY"
+    elif score >= 3:  econ_phase = "EXPANSION"
+    elif score >= 0:  econ_phase = "LATE_CYCLE"
+    elif score >= -4: econ_phase = "SLOWDOWN"
+    else:             econ_phase = "CONTRACTION"
+
+    detail["econ_score"] = score
+    guide = PHASE_GUIDE.get(econ_phase, {})
+    detail["favored"]     = guide.get("favored", [])
+    detail["avoid"]       = guide.get("avoid", [])
+    detail["phase_reason"]= guide.get("reason", "")
+
+    return econ_phase, score, detail
+
+
+def econ_bonus(ticker, econ_phase):
+    """คืนค่า bonus/penalty คะแนนตาม economic alignment ของหุ้น"""
+    sector = STOCK_ECON_SECTOR.get(ticker, "mega_cap_tech")
+    return SECTOR_PHASE_BONUS.get(sector, {}).get(econ_phase, 0)
+
+
+def score_stock(tk, df, data, econ_phase="EXPANSION"):
     c2=lc(df,2); c6=lc(df,6); c11=lc(df,11); c21=lc(df,21); vol=lv(df,25)
     if c2 is None: return None
     cn=float(c2[-1]); cp=float(c2[-2])
@@ -377,11 +536,16 @@ def score_stock(tk, df, data):
     sc+=(1 if above_20 else 0)
     sc+=(2 if vr>2 else 1 if vr>1.3 else 0)
 
+    # ── Economic Cycle Alignment Bonus ────────────────────
+    eb = econ_bonus(tk, econ_phase)
+    sc += eb
+
     return dict(ticker=tk, score=sc, price=round(cn,2),
                 mom_1d=round(m1,2), mom_5d=round(m5,2),
                 mom_10d=round(m10,2), vol_ratio=round(vr,2),
-                above_20ma=above_20,
-                strength=("แข็งมาก" if sc>=11 else "แข็ง" if sc>=8
+                above_20ma=above_20, econ_bonus=eb,
+                econ_sector=STOCK_ECON_SECTOR.get(tk,"?"),
+                strength=("แข็งมาก" if sc>=12 else "แข็ง" if sc>=9
                           else "ปานกลาง" if sc>=5 else "อ่อน" if sc>=2 else "ขาลง"))
 
 def score_gold(data):
@@ -698,11 +862,29 @@ def build_sell_reason(reason_code, pos, cur_price, peak, regime, sig):
     return parts
 
 
-def build_buy_reason(sig, regime, mac_score):
-    """สร้างเหตุผลการซื้อแบบละเอียด"""
+def build_buy_reason(sig, regime, mac_score, econ_phase="EXPANSION", econ_detail=None):
+    """สร้างเหตุผลการซื้อแบบละเอียด (รวม Economic Cycle)"""
+    econ_detail = econ_detail or {}
     parts = []
 
-    # 1. Macro
+    # 0. Economic Cycle (สำคัญที่สุด — แสดงก่อน)
+    guide = PHASE_GUIDE.get(econ_phase, {})
+    phase_th = guide.get("th", econ_phase)
+    phase_reason = guide.get("reason", "")
+    eb = sig.get("econ_bonus", 0)
+    sector = sig.get("econ_sector", "?")
+    if phase_reason:
+        parts.append(f"🌐 วัฏจักร econ: {phase_th} → {phase_reason}")
+    if eb > 0:
+        parts.append(f"✅ Sector [{sector}] เหมาะกับเฟสนี้ (econ bonus +{eb})")
+    elif eb < 0:
+        parts.append(f"⚠️ Sector [{sector}] ถูกกดดันในเฟสนี้ (econ penalty {eb})")
+    # Rate environment
+    rate_env = econ_detail.get("rate_env", "")
+    if rate_env:
+        parts.append(f"📊 ดอกเบี้ย: {rate_env} | Credit: {econ_detail.get('credit','?')}")
+
+    # 1. Macro Regime
     regime_th = {"STRONG_ON":"แข็งแกร่งมาก","RISK_ON":"ขาขึ้น",
                  "NEUTRAL":"ทรงตัว"}.get(regime, regime)
     parts.append(f"ตลาดอยู่ในโหมด {regime_th} (macro score {mac_score:+d})")
@@ -804,8 +986,10 @@ def apply_exits(state, exits, wb):
         del state["positions"][tk]
         print(f"  CLOSED {tk}: {ex['pnl_pct']:+.2f}% | {fmt_thb(ex['pnl_thb'])}")
 
-def apply_entries(state, picks, data, wb, regime="NEUTRAL", mac_score=0):
+def apply_entries(state, picks, data, wb, regime="NEUTRAL", mac_score=0,
+                  econ_phase="EXPANSION", econ_detail=None):
     """เปิด positions ใหม่"""
+    econ_detail = econ_detail or {}
     entries = []
     for sig in picks:
         tk = sig["ticker"]
@@ -828,7 +1012,7 @@ def apply_entries(state, picks, data, wb, regime="NEUTRAL", mac_score=0):
         else:
             result = {"entry": "SIMULATED"}
 
-        reason_detail = build_buy_reason(sig, regime, mac_score)
+        reason_detail = build_buy_reason(sig, regime, mac_score, econ_phase, econ_detail)
 
         state["cash_thb"] -= size_thb
         state["positions"][tk] = {
@@ -1062,14 +1246,95 @@ def build_mag7_telegram(mag7_rows, positions):
 
 # ── 5a. Email ────────────────────────────────────────────
 
+def build_econ_dashboard_html(econ_phase, econ_score, econ_detail):
+    """HTML card แสดง Economic Cycle Dashboard"""
+    guide  = PHASE_GUIDE.get(econ_phase, {})
+    color  = guide.get("color", "#6b7280")
+    phase_th = guide.get("th", econ_phase)
+    reason = guide.get("reason", "")
+    favored = guide.get("favored", [])
+    avoid   = guide.get("avoid", [])
+
+    # Progress bar for econ score (-10 to +10 → 0-100%)
+    bar_pct = int((econ_score + 10) / 20 * 100)
+    bar_pct = max(0, min(100, bar_pct))
+    bar_color = color
+
+    favored_html = " &nbsp;·&nbsp; ".join(
+        f'<span style="background:{color}22;color:{color};padding:2px 8px;'
+        f'border-radius:12px;font-size:12px">{f}</span>' for f in favored)
+    avoid_html = " &nbsp;·&nbsp; ".join(
+        f'<span style="background:#fee2e222;color:#dc2626;padding:2px 8px;'
+        f'border-radius:12px;font-size:12px">{a}</span>' for a in avoid)
+
+    # Indicator rows
+    indicators = [
+        ("📈 Yield 10Y",  econ_detail.get("rate_env", "?")),
+        ("💳 Credit",     econ_detail.get("credit",   "?")),
+        ("⚡ Growth",     econ_detail.get("growth",   "?")),
+        ("🧠 Sentiment",  econ_detail.get("sentiment","?")),
+        ("📊 Equity",     econ_detail.get("equity_mom","?")),
+    ]
+    ind_html = "".join(
+        f'<span style="display:inline-block;min-width:220px;margin:4px 12px 4px 0">'
+        f'<b>{lbl}</b>: {val}</span>'
+        for lbl, val in indicators
+    )
+
+    return f"""
+    <div class="card" style="border-top:4px solid {color}">
+      <h3>🏛️ Economic Cycle Dashboard</h3>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">
+        <span style="background:{color};color:#fff;font-size:16px;font-weight:700;
+                     padding:6px 18px;border-radius:20px">{phase_th}</span>
+        <span style="color:#6b7280;font-size:13px">Econ Score: <b style="color:{color}">{econ_score:+d}</b></span>
+      </div>
+      <div style="background:#f3f4f6;border-radius:8px;height:8px;margin-bottom:12px;overflow:hidden">
+        <div style="width:{bar_pct}%;height:100%;background:{bar_color};border-radius:8px"></div>
+      </div>
+      <p style="color:#374151;font-size:13px;margin:0 0 10px">
+        💡 <b>สรุป:</b> {reason}
+      </p>
+      <div style="font-size:13px;color:#374151;margin-bottom:8px">{ind_html}</div>
+      <div style="margin-top:10px">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">✅ <b>Sector แนะนำ:</b></div>
+        <div>{favored_html}</div>
+      </div>
+      {"" if not avoid else f'''
+      <div style="margin-top:8px">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">⛔ <b>หลีกเลี่ยง:</b></div>
+        <div>{avoid_html}</div>
+      </div>'''}
+    </div>"""
+
+
+def build_econ_dashboard_telegram(econ_phase, econ_score, econ_detail):
+    """Telegram text สำหรับ Econ Dashboard"""
+    guide    = PHASE_GUIDE.get(econ_phase, {})
+    phase_th = guide.get("th", econ_phase)
+    reason   = guide.get("reason", "")
+    favored  = guide.get("favored", [])
+    L = [f"\n🏛️ <b>Economic Cycle: {phase_th}</b>  (score {econ_score:+d})"]
+    L.append(f"   💡 {reason}")
+    L.append(f"   📈 Yield: {econ_detail.get('rate_env','?')}"
+             f"  │  💳 Credit: {econ_detail.get('credit','?')}")
+    L.append(f"   ⚡ Growth: {econ_detail.get('growth','?')}"
+             f"  │  🧠 {econ_detail.get('sentiment','?')}")
+    if favored:
+        L.append(f"   ✅ แนะนำ: {' · '.join(favored[:3])}")
+    return "\n".join(L)
+
+
 def build_email_html(state, regime, mac_score, macro_info,
                      exits, entries, all_signals, gold_score, gold_info,
-                     econ_news=None, tech_news=None, mag7_rows=None, trends=None):
+                     econ_news=None, tech_news=None, mag7_rows=None, trends=None,
+                     econ_phase="EXPANSION", econ_score=0, econ_detail=None):
     """สร้าง HTML email สวยงาม พร้อมตาราง portfolio + ข่าว"""
-    econ_news = econ_news or []
-    tech_news = tech_news or []
-    mag7_rows = mag7_rows or []
-    trends    = trends or []
+    econ_news   = econ_news or []
+    tech_news   = tech_news or []
+    mag7_rows   = mag7_rows or []
+    trends      = trends or []
+    econ_detail = econ_detail or {}
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
     regime_color = {
@@ -1279,16 +1544,21 @@ def build_email_html(state, regime, mac_score, macro_info,
     # ── Top watchlist ──
     top = sorted([s for s in all_signals if s and s["score"] >= MIN_SCORE],
                  key=lambda x: x["score"], reverse=True)[:8]
+    def ebon_badge(eb):
+        if eb > 0:   return f'<span style="color:#16a34a;font-weight:700">+{eb} econ</span>'
+        elif eb < 0: return f'<span style="color:#dc2626;font-weight:700">{eb} econ</span>'
+        return '<span style="color:#9ca3af">0</span>'
     watch_rows = "".join(f"""
     <tr>
       <td><b>{'📌 ' if s['ticker'] in state['positions'] else ''}{s['ticker']}</b></td>
-      <td>{s['score']}</td>
+      <td style="font-weight:700">{s['score']}</td>
       <td class="{pnl_cls(s['mom_1d'])}">{sign(s['mom_1d'])}{s['mom_1d']:.1f}%</td>
       <td class="{pnl_cls(s['mom_5d'])}">{sign(s['mom_5d'])}{s['mom_5d']:.1f}%</td>
       <td>{s['vol_ratio']:.1f}x</td>
       <td>${s['price']:.2f}</td>
       <td>{'✅' if s['above_20ma'] else '—'}</td>
-    </tr>""" for s in top) if top else "<tr><td colspan='7' style='color:#9ca3af'>ไม่มีหุ้นผ่านเกณฑ์</td></tr>"
+      <td>{ebon_badge(s.get('econ_bonus',0))}</td>
+    </tr>""" for s in top) if top else "<tr><td colspan='8' style='color:#9ca3af'>ไม่มีหุ้นผ่านเกณฑ์</td></tr>"
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>{css}</style></head>
@@ -1319,6 +1589,8 @@ def build_email_html(state, regime, mac_score, macro_info,
   {exits_html}
   {entries_html}
 
+  {build_econ_dashboard_html(econ_phase, econ_score, econ_detail)}
+
   {build_trend_html(trends)}
 
   {build_mag7_html(mag7_rows, state['positions'])}
@@ -1326,7 +1598,7 @@ def build_email_html(state, regime, mac_score, macro_info,
   <div class="card">
     <h3>🔍 หุ้นน่าสนใจ (score ≥ {MIN_SCORE})</h3>
     <table>
-      <tr><th>หุ้น</th><th>Score</th><th>1d</th><th>5d</th><th>Volume</th><th>ราคา</th><th>&gt;MA20</th></tr>
+      <tr><th>หุ้น</th><th>Score</th><th>1d</th><th>5d</th><th>Volume</th><th>ราคา</th><th>&gt;MA20</th><th>Econ</th></tr>
       {watch_rows}
     </table>
   </div>
@@ -1458,15 +1730,17 @@ def send_telegram_chunks(message):
 
 def build_telegram_message(state, regime, mac_score, macro_info,
                            exits, entries, all_signals, gold_score, gold_info,
-                           econ_news=None, tech_news=None, mag7_rows=None, trends=None):
+                           econ_news=None, tech_news=None, mag7_rows=None, trends=None,
+                           econ_phase="EXPANSION", econ_score=0, econ_detail=None):
     """
     สร้างข้อความสำหรับ Telegram (HTML format)
     <b>bold</b>  <i>italic</i>  <code>code</code>
     """
-    econ_news = econ_news or []
-    mag7_rows = mag7_rows or []
-    trends    = trends or []
-    tech_news = tech_news or []
+    econ_news   = econ_news or []
+    mag7_rows   = mag7_rows or []
+    trends      = trends or []
+    tech_news   = tech_news or []
+    econ_detail = econ_detail or {}
     now_bkk = datetime.utcnow() + timedelta(hours=7)
 
     regime_emoji = {
@@ -1500,6 +1774,10 @@ def build_telegram_message(state, regime, mac_score, macro_info,
              f"  │  DXY <b>{macro_info.get('dxy','?')}</b>")
     L.append(f"   💱 1 USD = <b>฿{macro_info.get('thb_usd', THB_USD_RATE):.2f}</b>"
              f"  (live)")
+
+    # ── Economic Cycle
+    if econ_phase:
+        L.append(build_econ_dashboard_telegram(econ_phase, econ_score, econ_detail))
 
     # ── Portfolio
     L.append(f"\n💼 <b>Portfolio Paper Trading</b>")
@@ -1647,9 +1925,17 @@ def run():
     regime, mac_score, macro_info = get_macro(data)
     print(f"  Regime: {regime} ({mac_score:+d}) | VIX={macro_info.get('vix','?')}")
 
-    # Signals
-    print("\n[4/6] คำนวณ signal...")
-    signals = [score_stock(tk, data[tk], data) for tk in WATCHLIST if tk in data]
+    # Economic Cycle
+    print("\n[3.5/6] วิเคราะห์ Economic Cycle...")
+    econ_phase, econ_sc, econ_detail = get_econ_cycle(macro_info, data)
+    guide = PHASE_GUIDE.get(econ_phase, {})
+    print(f"  Econ Phase: {econ_phase} ({econ_sc:+d}) | {guide.get('th','')}")
+    print(f"  Rate: {econ_detail.get('rate_env','?')} | Credit: {econ_detail.get('credit','?')}")
+    print(f"  Growth: {econ_detail.get('growth','?')} | Sentiment: {econ_detail.get('sentiment','?')}")
+
+    # Signals (ใส่ econ_phase เพื่อคำนวณ econ bonus)
+    print("\n[4/6] คำนวณ signal (รวม Econ Alignment)...")
+    signals = [score_stock(tk, data[tk], data, econ_phase) for tk in WATCHLIST if tk in data]
     signals = [s for s in signals if s]
     gold_sc, gold_info = score_gold(data)
     signals_map = {s["ticker"]:s for s in signals}
@@ -1660,6 +1946,9 @@ def run():
     emerging  = [t for t in trends if t["phase"] == "EMERGING"]
     rising    = [t for t in trends if t["phase"] == "RISING"]
     print(f"  eligible: {len(eligible)}/{len(signals)} | gold score={gold_sc}")
+    print(f"  Top picks: " + " | ".join(
+        f"{s['ticker']}({s['score']},eb{s.get('econ_bonus',0):+d})"
+        for s in sorted(eligible, key=lambda x:x["score"], reverse=True)[:5]))
     print(f"  Mag7: " + " | ".join(
         f"{r['ticker']} {r['mom_1d']:+.1f}%" for r in mag7_rows if r.get("price")))
     print(f"  Trends: 🌱 {len(emerging)} emerging | 🚀 {len(rising)} rising")
@@ -1691,7 +1980,7 @@ def run():
         slots = MAX_SLOTS - len(state["positions"])
         picks = candidates[:slots]
 
-    entries = apply_entries(state, picks, data, wb, regime, mac_score)
+    entries = apply_entries(state, picks, data, wb, regime, mac_score, econ_phase, econ_detail)
 
     # Update portfolio value
     state["last_updated"] = datetime.now().isoformat()
@@ -1715,7 +2004,8 @@ def run():
     html_body = build_email_html(
         state, regime, mac_score, macro_info,
         exits, entries, signals, gold_sc, gold_info,
-        econ_news, tech_news, mag7_rows, trends
+        econ_news, tech_news, mag7_rows, trends,
+        econ_phase, econ_sc, econ_detail
     )
     send_email(subject, html_body)
 
@@ -1724,7 +2014,8 @@ def run():
         tg_msg = build_telegram_message(
             state, regime, mac_score, macro_info,
             exits, entries, signals, gold_sc, gold_info,
-            econ_news, tech_news, mag7_rows, trends
+            econ_news, tech_news, mag7_rows, trends,
+            econ_phase, econ_sc, econ_detail
         )
         send_telegram_chunks(tg_msg)
 
@@ -1733,6 +2024,8 @@ def run():
         datetime=datetime.now().isoformat(),
         rate_thb_usd=THB_USD_RATE,
         regime=regime, macro_score=mac_score,
+        econ_phase=econ_phase, econ_score=econ_sc,
+        econ_detail=econ_detail,
         positions=state["positions"],
         exits=exits, entries=entries,
         signals=sorted(signals, key=lambda x:x["score"], reverse=True)[:10],
